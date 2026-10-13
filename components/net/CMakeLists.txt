@@ -1,0 +1,4 @@
+add_subdirectory_if_exist(ali_c_sdk)
+add_subdirectory_if_exist(pahomqtt)
+add_subdirectory_if_exist(json)
+add_subdirectory_if_exist(httpclient)

@@ -1,0 +1,53 @@
+// start define -I
+-I..\wifi\export_inc
+// end define -I
+
+// start header
+#include "wifi.h"
+#include "atiny_socket.h"
+// end header
+
+
+// start core_stub
+
+// export api list start
+int wifi_open(void);
+void wifi_close(void);
+int wifi_is_open(void);
+int wifi_start_scan_networks(void);
+int wifi_is_scan_complete(void);
+int wifi_get_scan_data(ap_info_t *ap_info, int size);
+int wifi_connect(const char *ssid, const char *key);
+int wifi_get_join_status(void);
+int wifi_is_connected(void);
+int wifi_disconnect(void);
+int wifi_get_network_info(network_info_t *info);
+int wifi_get_firmware_info(int module, char *buf, int size);
+int wifi_search_select_ap(int timeout, int language);
+int wifi_check(void);
+int wifi_get_rssi(int *rssi);
+int wifi_set_opt(int cmd,void *opt,int optlen);
+
+int wifi_ap_mode_start(ap_mode_info_t *ap_info);
+int wifi_ap_mode_is_done(char ssid[33], char password[65]);
+int wifi_ap_mode_stop(void);
+int wifi_airkiss_start(void);
+int wifi_airkiss_stop(void);
+int wifi_airkiss_is_done(char ssid[33], char password[65]);
+
+int atiny_net_accept(void *bind_ctx, void *client_ctx, void *client_ip, size_t buf_size, size_t *ip_len);
+int32_t AtApiBind(const char *host, const char *port, int proto);
+int atiny_net_connect(atiny_net_context *ctx, const char *host, const char *port, int proto);
+int atiny_net_recv(void *ctx, unsigned char *buf, size_t len);
+int atiny_net_send(void *ctx, const unsigned char *buf, size_t len);
+int atiny_net_recv_timeout(void *ctx, unsigned char *buf, size_t len, uint32_t timeout);
+int atiny_net_send_timeout(void *ctx, const unsigned char *buf, size_t len, uint32_t timeout);
+int atiny_net_close(void *ctx);
+
+int wifi_update(char* binaryPath);
+
+// export api list end
+
+// start keep source
+
+// end keep source
