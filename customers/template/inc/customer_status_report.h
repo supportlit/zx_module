@@ -130,6 +130,25 @@ int customer_status_report_coordinate(const device_coordinate_t *coord);
  */
 int customer_status_report_payment(const payment_callback_t *callback);
 
+/**
+ * @brief Send TMS HTTPS heartbeat immediately
+ * @return 0 on success, negative error code on failure
+ */
+int customer_send_tms_heartbeat(void);
+
+/**
+ * @brief Start periodic TMS HTTPS heartbeat
+ * @param interval_sec Heartbeat interval in seconds (0 to use TMS_HEARTBEAT_INTERVAL_SEC)
+ * @return 0 on success, negative error code on failure
+ */
+int customer_tms_heartbeat_start(uint32_t interval_sec);
+
+/**
+ * @brief Stop periodic TMS HTTPS heartbeat
+ * @return 0 on success
+ */
+int customer_tms_heartbeat_stop(void);
+
 #ifdef __cplusplus
 }
 #endif

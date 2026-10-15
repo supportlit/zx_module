@@ -13,8 +13,10 @@
 #include "cJSON.h"
 #include "osi_api.h"
 #include "customer_config.h"
+#include "framework_http.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 
 #define TAG "STATUS_REPORT"
@@ -399,5 +401,203 @@ int customer_status_report_payment(const payment_callback_t *callback)
 int customer_set_report_ntp_sync(uint8_t status)
 {
     ntp_sync = status;
+    return 0;
+}
+
+/* ============================================================================
+ * TMS HTTPS Heartbeat Implementation
+ * ============================================================================ */
+
+static osiThread_t *s_tms_hb_thread_handle = NULL;
+static uint32_t s_tms_hb_interval_sec = TMS_HEARTBEAT_INTERVAL_SEC;
+static volatile uint8_t s_tms_hb_running = 0;
+
+static void prv_tms_hb_http_callback(http_response_t *response, void *user_data)
+{
+    (void)user_data;
+    if (!response) {
+        OSI_LOGE(TAG, "[TMS_HB] No response received");
+        return;
+    }
+
+    if (response->result == HTTP_RESULT_SUCCESS && response->status_code == 200) {
+        OSI_LOGI(TAG, "[TMS_HB] Heartbeat SUCCESS [HTTP %d, len=%u]: %.64s",
+                 response->status_code,
+                 (unsigned int)response->response_len,
+                 response->response_data ? response->response_data : "");
+    } else {
+        OSI_LOGE(TAG, "[TMS_HB] Heartbeat FAILED [Result: %d, HTTP Code: %d]",
+                 response->result, response->status_code);
+    }
+}
+
+int customer_send_tms_heartbeat(void)
+{
+    if (!framework_network_is_connected()) {
+        OSI_LOGW(TAG, "[TMS_HB] Network not connected, skipping heartbeat");
+        return -1;
+    }
+
+    char sn[32] = {0};
+    framework_device_config_get_sn(sn, sizeof(sn));
+    if (strlen(sn) == 0) {
+        strncpy(sn, TMS_HEARTBEAT_TID, sizeof(sn) - 1);
+    }
+
+    const char *iccid = framework_network_get_iccid();
+    if (!iccid) {
+        iccid = "";
+    }
+
+    char act_date[36] = {0};
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    if (tm_info && tm_info->tm_year > 120) { /* year > 2020 */
+        snprintf(act_date, sizeof(act_date), "%04d/%02d/%02d %02d:%02d:%02d +22 0",
+                 tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
+                 tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
+    } else {
+        strncpy(act_date, "2026/09/24 18:48:13 +22 0", sizeof(act_date) - 1);
+    }
+
+    /* Allocate JSON body on heap to avoid stack overflow */
+    char *json_body = (char *)malloc(1024);
+    if (!json_body) {
+        OSI_LOGE(TAG, "[TMS_HB] Failed to allocate JSON buffer");
+        return -2;
+    }
+
+    int len = snprintf(json_body, 1024,
+        "{\n"
+        "    \"actDate\": \"%s\",\n"
+        "    \"actStatus\": \"%s\",\n"
+        "    \"androidVersion\": \"%s\",\n"
+        "    \"apkVersion\": \"%s\",\n"
+        "    \"appVersion\": \"%s\",\n"
+        "    \"configVersion\": \"%s\",\n"
+        "    \"cpu\": \"%s\",\n"
+        "    \"did\": \"%s\",\n"
+        "    \"firmwareVersion\": \"%s\",\n"
+        "    \"lastStan\": \"\",\n"
+        "    \"lat\": \"\",\n"
+        "    \"lng\": \"\",\n"
+        "    \"lstTxnDateTime\": \"\",\n"
+        "    \"mId\": \"%s\",\n"
+        "    \"simSrlNo\": \"%s\",\n"
+        "    \"srlNo\": \"%s\",\n"
+        "    \"tId\": \"%s\",\n"
+        "    \"tModel\": \"%s\",\n"
+        "    \"tStatus\": \"%s\",\n"
+        "    \"trsm\": \"\"\n"
+        "}",
+        act_date,
+        TMS_HEARTBEAT_ACT_STATUS,
+        TMS_HEARTBEAT_ANDROID_VER,
+        TMS_HEARTBEAT_APK_VER,
+        TMS_HEARTBEAT_APP_VER,
+        TMS_HEARTBEAT_CONFIG_VER,
+        TMS_HEARTBEAT_CPU,
+        TMS_HEARTBEAT_DID,
+        TMS_HEARTBEAT_FIRMWARE_VER,
+        TMS_HEARTBEAT_MID,
+        iccid,
+        sn,
+        TMS_HEARTBEAT_TID,
+        TMS_HEARTBEAT_MODEL,
+        TMS_HEARTBEAT_TSTATUS
+    );
+
+    if (len < 0 || len >= 1024) {
+        OSI_LOGE(TAG, "[TMS_HB] JSON buffer overflow");
+        free(json_body);
+        return -3;
+    }
+
+    static const char *header = "Authorization: " TMS_HEARTBEAT_AUTH_TOKEN "\r\nContent-Type: application/json\r\n";
+
+    OSI_LOGI(TAG, "[TMS_HB] Sending HTTPS Heartbeat to %s (len=%d)", TMS_HEARTBEAT_URL, len);
+
+    int ret = framework_http_post_json(
+        TMS_HEARTBEAT_URL,
+        json_body,
+        header,
+        prv_tms_hb_http_callback,
+        NULL
+    );
+
+    free(json_body);
+
+    if (ret != 0) {
+        OSI_LOGE(TAG, "[TMS_HB] Failed to queue HTTP post: %d", ret);
+    }
+    return ret;
+}
+
+static void prv_tms_hb_thread(void *param)
+{
+    (void)param;
+    OSI_LOGI(TAG, "[TMS_HB] Thread started, interval=%u s", (unsigned int)s_tms_hb_interval_sec);
+
+    /* Allow network stack, PDP routing, and MQTT to settle cleanly before first transmission */
+    for (int i = 0; i < 5 && s_tms_hb_running; i++) {
+        osiThreadSleepMs(1000);
+    }
+
+    while (s_tms_hb_running) {
+        if (framework_network_is_connected()) {
+            customer_send_tms_heartbeat();
+        } else {
+            OSI_LOGW(TAG, "[TMS_HB] Network not connected, waiting...");
+        }
+
+        /* Sleep in 1-second chunks so that customer_tms_heartbeat_stop() can exit cleanly */
+        uint32_t elapsed = 0;
+        while (s_tms_hb_running && elapsed < s_tms_hb_interval_sec) {
+            osiThreadSleepMs(1000);
+            elapsed++;
+        }
+    }
+
+    s_tms_hb_thread_handle = NULL;
+    OSI_LOGI(TAG, "[TMS_HB] Thread stopped");
+    osiThreadExit();
+}
+
+int customer_tms_heartbeat_start(uint32_t interval_sec)
+{
+    if (interval_sec == 0) {
+        interval_sec = TMS_HEARTBEAT_INTERVAL_SEC;
+    }
+    s_tms_hb_interval_sec = interval_sec;
+
+    if (s_tms_hb_running) {
+        OSI_LOGI(TAG, "[TMS_HB] Already running, interval=%u s", (unsigned int)interval_sec);
+        return 0;
+    }
+
+    s_tms_hb_running = 1;
+    s_tms_hb_thread_handle = osiThreadCreate("tms_hb",
+                                             prv_tms_hb_thread,
+                                             NULL,
+                                             STATUS_REPORT_PRIORITY,
+                                             4 * 1024);
+    if (!s_tms_hb_thread_handle) {
+        OSI_LOGE(TAG, "[TMS_HB] Failed to create thread");
+        s_tms_hb_running = 0;
+        return -1;
+    }
+
+    OSI_LOGI(TAG, "[TMS_HB] Heartbeat thread created, interval=%u s", (unsigned int)interval_sec);
+    return 0;
+}
+
+int customer_tms_heartbeat_stop(void)
+{
+    if (!s_tms_hb_running) {
+        return 0;
+    }
+
+    s_tms_hb_running = 0;
+    OSI_LOGI(TAG, "[TMS_HB] Heartbeat stopping...");
     return 0;
 }

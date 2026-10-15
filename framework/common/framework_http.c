@@ -868,6 +868,9 @@ int framework_http_request_async(http_request_t *request, http_callback_t callba
 
     if (!osiMessageQueuePut(g_http_ctx.request_queue, &item)) {
         OSI_LOGE(TAG , " Failed to queue request");
+        if (item->payload.http_req.request.body) {
+            free(item->payload.http_req.request.body);
+        }
         free(item);
         return -5;
     }
@@ -883,22 +886,29 @@ int framework_http_post_json(const char *url, const char *body, const char *head
         return -1;
     }
 
-    http_request_t request = {0};
-    request.method = HTTP_METHOD_POST;
-    request.timeout_ms = 10000;
-    request.user_data = user_data;
+    http_request_t *request = (http_request_t *)malloc(sizeof(http_request_t));
+    if (!request) {
+        OSI_LOGE(TAG, "Failed to allocate http request memory");
+        return -1;
+    }
+    memset(request, 0, sizeof(http_request_t));
+    request->method = HTTP_METHOD_POST;
+    request->timeout_ms = 10000;
+    request->user_data = user_data;
 
-    strncpy(request.url, url, HTTP_MAX_URL_LEN - 1);
-    request.body = (char *)body;
-    request.body_len = strlen(body);
+    strncpy(request->url, url, HTTP_MAX_URL_LEN - 1);
+    request->body = (char *)body;
+    request->body_len = strlen(body);
 
     if (header && strlen(header) > 0) {
-        strncpy(request.header, header, HTTP_MAX_HEADER_LEN - 1);
+        strncpy(request->header, header, HTTP_MAX_HEADER_LEN - 1);
     } else {
-        snprintf(request.header, HTTP_MAX_HEADER_LEN, "Content-Type: application/json\r\n");
+        snprintf(request->header, HTTP_MAX_HEADER_LEN, "Content-Type: application/json\r\n");
     }
 
-    return framework_http_request_async(&request, callback);
+    int ret = framework_http_request_async(request, callback);
+    free(request);
+    return ret;
 }
 
 int framework_http_post_json_with_sni(const char *url, const char *body, const char *header,
@@ -907,21 +917,28 @@ int framework_http_post_json_with_sni(const char *url, const char *body, const c
         return -1;
     }
 
-    http_request_t request = {0};
-    request.method = HTTP_METHOD_POST;
-    request.timeout_ms = 10000;
-    request.user_data = user_data;
-    request.sni_host = sni_host;
+    http_request_t *request = (http_request_t *)malloc(sizeof(http_request_t));
+    if (!request) {
+        OSI_LOGE(TAG, "Failed to allocate http request memory");
+        return -1;
+    }
+    memset(request, 0, sizeof(http_request_t));
+    request->method = HTTP_METHOD_POST;
+    request->timeout_ms = 10000;
+    request->user_data = user_data;
+    request->sni_host = sni_host;
 
-    strncpy(request.url, url, HTTP_MAX_URL_LEN - 1);
-    request.body = (char *)body;
-    request.body_len = strlen(body);
+    strncpy(request->url, url, HTTP_MAX_URL_LEN - 1);
+    request->body = (char *)body;
+    request->body_len = strlen(body);
 
     if (header && strlen(header) > 0) {
-        strncpy(request.header, header, HTTP_MAX_HEADER_LEN - 1);
+        strncpy(request->header, header, HTTP_MAX_HEADER_LEN - 1);
     } else {
-        snprintf(request.header, HTTP_MAX_HEADER_LEN, "Content-Type: application/json\r\n");
+        snprintf(request->header, HTTP_MAX_HEADER_LEN, "Content-Type: application/json\r\n");
     }
 
-    return framework_http_request_async(&request, callback);
+    int ret = framework_http_request_async(request, callback);
+    free(request);
+    return ret;
 }

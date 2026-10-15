@@ -11,7 +11,7 @@
 #define CUSTOMER_NAME "template"
 
 // LCD 功能开关 (1: Enable, 0: Disable)
-#define CUSTOMER_ENABLE_LCD 1
+#define CUSTOMER_ENABLE_LCD 0
 
 #define LED_GREEN_PIN 85
 #define LED_GREEN_PINMUX GPIO_VCXO_REQ
@@ -55,6 +55,26 @@
 
 // 心跳包配置
 #define HEARTBEAT_INTERVAL_SEC 60
+
+// ============================================================================
+// TMS HTTPS Heartbeat Configuration
+// ============================================================================
+#define TMS_HEARTBEAT_ENABLE          1
+#define TMS_HEARTBEAT_INTERVAL_SEC    60  /* Heartbeat interval in seconds (e.g. 30, 60, 120, 300) */
+#define TMS_HEARTBEAT_URL             "https://35.154.110.244:8075/sxtms/online/tms/saveHB"
+#define TMS_HEARTBEAT_AUTH_TOKEN      "f1c3a7e8b9d5e2a0dh7d8f9dh97d"
+#define TMS_HEARTBEAT_MID             "000001"
+#define TMS_HEARTBEAT_TID             "11110003"
+#define TMS_HEARTBEAT_MODEL           "LIT001"
+#define TMS_HEARTBEAT_DID             "00020024422317237344"
+#define TMS_HEARTBEAT_CPU             "B26747802400E59FFE0B2AAF7B000000"
+#define TMS_HEARTBEAT_ACT_STATUS      "REGISTERED"
+#define TMS_HEARTBEAT_CONFIG_VER      "1.1"
+#define TMS_HEARTBEAT_ANDROID_VER     "10"
+#define TMS_HEARTBEAT_APK_VER         "1.0.1"
+#define TMS_HEARTBEAT_APP_VER         "1.0.1"
+#define TMS_HEARTBEAT_FIRMWARE_VER    "1.0.1"
+#define TMS_HEARTBEAT_TSTATUS         "Active"
 
 // 设备信息存储路径
 #define DEVICE_INFO_PATH "D:/template_device.cfg"

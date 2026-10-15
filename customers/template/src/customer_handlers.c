@@ -6,6 +6,7 @@
 #include "customer_handlers.h"
 #include "customer_mqtt_handler.h"
 #include "customer_payment_handler.h"
+#include "customer_status_report.h"
 #include "customer_battery_config.h"
 #include "app_lcd.h"
 #include "framework_device_config.h"
@@ -911,7 +912,11 @@ int customer_msg_handler(framework_msg_t *msg)
         } else {
             OSI_LOGI(TAG, "MQTT handler initialized successfully");
         }
-        
+
+#if defined(TMS_HEARTBEAT_ENABLE) && (TMS_HEARTBEAT_ENABLE == 1)
+        customer_tms_heartbeat_start(TMS_HEARTBEAT_INTERVAL_SEC);
+#endif
+
         return 0;
     case MSG_NET_DISCONNECTED:
         OSI_LOGI(TAG, "Network disconnected");

@@ -86,7 +86,7 @@ static int reconnect_count_idx = 0;
 // Topics to subscribe after connection
 static const char *g_template_topics[] = {
 #if defined(CUSTOMER_ENABLE_LCD) && (CUSTOMER_ENABLE_LCD == 1)
-    "device/LIT_PBL_DISP_008/pebble_screen", 
+    "device/LIT_PBL_DISP_006/pebble_screen", 
 #else
     //"device/LIT_PBL_001/pebble",
     "device/LIT_PKT_005/pocket",
