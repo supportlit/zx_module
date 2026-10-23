@@ -9,6 +9,9 @@
 #include "audio_resource_map.h"
 #include "app_lcd.h"
 #include "fs_api.h" // add by vipin: for filesystem checks
+#include "customer_status_report.h"
+#include "framework_device_config.h"
+#include "osi_api.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -220,6 +223,61 @@ static uint32_t s_last_txn_count = 0;  // add by vipin: transaction count of las
 #define CUSTOMER_LCD_SHOW_TXN_COUNT 1 // add by vipin: 1 = Show Total Txn Count on LCD side display, 0 = Hide side count
 #endif
 
+static char s_pending_txn_id[64] = {0};
+static char s_pending_amount_str[16] = {0};
+static char s_pending_language[8] = {0};
+
+static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audio_playback_status_t status, int result)
+{
+    if (status == AUDIO_PLAYBACK_STATUS_STARTED) {
+        FRAMEWORK_LOG("[PAYMENT_AUDIO] Playback started on speaker");
+    } else if (status == AUDIO_PLAYBACK_STATUS_ENDED) {
+        FRAMEWORK_LOG("[PAYMENT_AUDIO] Playback completed successfully");
+        if (s_pending_txn_id[0] != '\0') {
+            payment_callback_t cb = {0};
+            char sn[32] = {0};
+            framework_device_config_get_sn(sn, sizeof(sn));
+            strncpy(cb.serial_number, sn, sizeof(cb.serial_number) - 1);
+            strncpy(cb.status, "1", sizeof(cb.status) - 1); // 1 = Success
+            strncpy(cb.transaction_id, s_pending_txn_id, sizeof(cb.transaction_id) - 1);
+            strncpy(cb.amount, s_pending_amount_str, sizeof(cb.amount) - 1);
+            strncpy(cb.language, s_pending_language, sizeof(cb.language) - 1);
+            cb.reason[0] = '\0';
+            osiTime_t now = {0};
+            osiGetTime(&now);
+            snprintf(cb.sound_played_datetime, sizeof(cb.sound_played_datetime), "%04d-%02d-%02d %02d:%02d:%02d",
+                     now.tm_year, now.tm_mon, now.tm_mday,
+                     now.tm_hour, now.tm_min, now.tm_sec);
+            customer_status_report_payment(&cb);
+            s_pending_txn_id[0] = '\0';
+            s_pending_amount_str[0] = '\0';
+            s_pending_language[0] = '\0';
+        }
+    } else if (status == AUDIO_PLAYBACK_STATUS_ERROR) {
+        FRAMEWORK_LOG("[PAYMENT_AUDIO] Playback error: %d", result);
+        if (s_pending_txn_id[0] != '\0') {
+            payment_callback_t cb = {0};
+            char sn[32] = {0};
+            framework_device_config_get_sn(sn, sizeof(sn));
+            strncpy(cb.serial_number, sn, sizeof(cb.serial_number) - 1);
+            strncpy(cb.status, "0", sizeof(cb.status) - 1); // 0 = Failure
+            strncpy(cb.transaction_id, s_pending_txn_id, sizeof(cb.transaction_id) - 1);
+            strncpy(cb.amount, s_pending_amount_str, sizeof(cb.amount) - 1);
+            strncpy(cb.language, s_pending_language, sizeof(cb.language) - 1);
+            snprintf(cb.reason, sizeof(cb.reason), "Audio play error %d", result);
+            osiTime_t now = {0};
+            osiGetTime(&now);
+            snprintf(cb.sound_played_datetime, sizeof(cb.sound_played_datetime), "%04d-%02d-%02d %02d:%02d:%02d",
+                     now.tm_year, now.tm_mon, now.tm_mday,
+                     now.tm_hour, now.tm_min, now.tm_sec);
+            customer_status_report_payment(&cb);
+            s_pending_txn_id[0] = '\0';
+            s_pending_amount_str[0] = '\0';
+            s_pending_language[0] = '\0';
+        }
+    }
+}
+
 // add by vipin: internal broadcast handler distinguishing new transaction vs replay
 static int prv_customer_payment_broadcast_internal(const payment_broadcast_params_t *params, bool is_replay)
 {
@@ -235,6 +293,23 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
     if (!is_replay) {
         s_total_txn_count++; // add by vipin: increment transaction count for new payment
         s_last_txn_count = s_total_txn_count;
+        if (params->transaction_id[0] != '\0') {
+            strncpy(s_pending_txn_id, params->transaction_id, sizeof(s_pending_txn_id) - 1);
+            s_pending_txn_id[sizeof(s_pending_txn_id) - 1] = '\0';
+        }
+        if (params->amount_str[0] != '\0') {
+            strncpy(s_pending_amount_str, params->amount_str, sizeof(s_pending_amount_str) - 1);
+            s_pending_amount_str[sizeof(s_pending_amount_str) - 1] = '\0';
+        } else {
+            snprintf(s_pending_amount_str, sizeof(s_pending_amount_str), "%.2f", params->total_amount);
+        }
+        if (params->language[0] != '\0') {
+            strncpy(s_pending_language, params->language, sizeof(s_pending_language) - 1);
+            s_pending_language[sizeof(s_pending_language) - 1] = '\0';
+        } else {
+            strncpy(s_pending_language, "EN", sizeof(s_pending_language) - 1);
+            s_pending_language[sizeof(s_pending_language) - 1] = '\0';
+        }
     }
 
     audio_list = (char *)malloc(MAX_AUDIO_LIST_SIZE);
@@ -277,7 +352,7 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
 #else
     prvLcdSecCodeSet((long)(params->rupees > 0 ? params->rupees : params->amount));
 #endif
-    ret = audio_resource_play_combo_async_mid_priority(PAYMENT_AUDIO_FOLDER, audio_list, NULL, 0);
+    ret = audio_resource_play_combo_async_mid_priority(PAYMENT_AUDIO_FOLDER, audio_list, prv_payment_audio_playback_callback, 0);
     free(audio_list);
     if (ret != 0) {
         FRAMEWORK_LOG("Failed to play payment combo (err=%d)", ret);

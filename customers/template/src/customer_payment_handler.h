@@ -16,6 +16,9 @@ typedef struct {
     uint32_t paise;         // add by vipin: decimal part of amount (Paise, 0-99)
     double total_amount;    // add by vipin: total amount in float/double
     uint32_t bank_bin;
+    char transaction_id[64]; // Transaction ID for completion ACK
+    char amount_str[16];     // add by vipin: Amount string for ACK (e.g. "16.32")
+    char language[8];        // add by vipin: Language for ACK (e.g. "EN")
 } payment_broadcast_params_t;
 
 int customer_payment_broadcast(const payment_broadcast_params_t *params);

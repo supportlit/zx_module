@@ -1,0 +1,28 @@
+# Build outputs
+out/
+output_*/
+
+# Compiled binaries and object files
+*.o
+*.obj
+*.a
+*.bin
+*.elf
+*.map
+*.hex
+
+# Build system files
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.ninja
+.ninja_*
+rules.ninja
+
+# Temporary and editor files
+*.swp
+*.bak
+*.tmp
+.vscode/
+.idea/

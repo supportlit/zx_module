@@ -18,7 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-
+#include "customer_heartbeat_api.h"
 #define TAG "STATUS_REPORT"
 
 #define TOPIC_SOUNDBOX_STATUS           "BP1/soundbox/status"
@@ -102,7 +102,7 @@ static int prv_publish_json(const char *topic, cJSON *json)
     return ret;
 }
 
-static void prv_collect_and_report_status(void)
+OSI_UNUSED static void prv_collect_and_report_status(void)
 {
     soundbox_status_t status = {0};
     
@@ -147,7 +147,7 @@ static void prv_collect_and_report_status(void)
 }
 
 /* Compute delay (ms) until next heartbeat at 03:00 / 15:00 / 19:00 UTC+7 */
-static uint32_t prv_calc_next_heartbeat_delay_ms(void)
+OSI_UNUSED static uint32_t prv_calc_next_heartbeat_delay_ms(void)
 {
     time_t now_utc = time(NULL);
     if (now_utc == (time_t)-1) {
@@ -155,7 +155,7 @@ static uint32_t prv_calc_next_heartbeat_delay_ms(void)
     }
     time_t now_jakarta = now_utc + JAKARTA_UTC_OFFSET_SEC;
     OSI_LOGI(TAG, "now_utc:%ld,,Current UTC time: %ld(%s)", now_utc, now_jakarta, ctime(&now_jakarta));
-    if(osiGetTimeZone() != 8){osiSetTimeZoneMin(8*60);}
+    if (osiGetTimeZoneMin() != 330) { osiSetTimeZoneMin(330); }
     struct tm *tm_j = localtime(&now_jakarta);
     if (!tm_j) {
         return HEARTBEAT_INTERVAL_SEC * 1000U;
@@ -185,24 +185,25 @@ static void prv_status_report_thread(void *param)
 {
     (void)param;
 
-    OSI_LOGI(TAG, "Status report thread started (scheduled 03:00/15:00/19:00 UTC+7)");
-    while (g_report_ctx.running) {
+    uint32_t interval = g_report_ctx.report_interval_sec ? g_report_ctx.report_interval_sec : 60;
+    OSI_LOGI(TAG, "Status report thread started (interval: %ld sec)", interval);
 
-        framework_network_ntp_sync_now(false);
-        while(!ntp_sync){
+    while (g_report_ctx.running) {
+        interval = g_report_ctx.report_interval_sec ? g_report_ctx.report_interval_sec : 60;
+
+        /* Sleep for the configured interval in slices for clean shutdown */
+        for (uint32_t sec = 0; sec < interval && g_report_ctx.running; sec++) {
             osiThreadSleep(1000/5);
         }
-        ntp_sync = 0;
-        uint32_t delay_ms = prv_calc_next_heartbeat_delay_ms();
-        OSI_LOGI(TAG, "Next heartbeat in %ld sec", delay_ms / 1000U);
-        osiThreadSleep(delay_ms/5);
 
         if (!g_report_ctx.running) {
             break;
         }
 
         if (framework_mqtt_is_connected()) {
-            prv_collect_and_report_status();
+            OSI_LOGI(TAG, "[HEARTBEAT] Publishing periodic health status to SBHealthStatus");
+            customer_dux_publish_health_status();
+            // prv_collect_and_report_status();
         } else {
             OSI_LOGW(TAG, "MQTT not connected, skipping scheduled heartbeat");
         }
@@ -377,24 +378,41 @@ int customer_status_report_payment(const payment_callback_t *callback)
     if (!callback) {
         return -1;
     }
-    
+
     if (!framework_mqtt_is_connected()) {
-        OSI_LOGW(TAG, "MQTT not connected");
+        OSI_LOGW(TAG, "MQTT not connected, cannot send TXN_ACK");
         return -2;
     }
-    
+
     cJSON *json = cJSON_CreateObject();
     if (!json) {
         return -3;
     }
-    
-    cJSON_AddStringToObject(json, "serial_number", callback->serial_number);
-    cJSON_AddStringToObject(json, "transaction_id", callback->transaction_id);
-    cJSON_AddStringToObject(json, "status", callback->status);
-    
-    int ret = prv_publish_json(TOPIC_PAYMENT_CALLBACK, json);
+
+    /* Hitachi TMS Section 5 Transaction ACK Fields */
+    const char *play_status = "1";
+    if (strcmp(callback->status, "0") == 0 || strcmp(callback->status, "FAILURE") == 0) {
+        play_status = "0";
+    }
+
+    char dt_buf[32] = {0};
+    if (callback->sound_played_datetime[0] != '\0') {
+        strncpy(dt_buf, callback->sound_played_datetime, sizeof(dt_buf) - 1);
+    } else {
+        customer_dux_get_datetime_str(dt_buf, sizeof(dt_buf));
+    }
+
+    cJSON_AddStringToObject(json, "serial_no", callback->serial_number);
+    cJSON_AddStringToObject(json, "TxnId", callback->transaction_id);
+    cJSON_AddStringToObject(json, "SoundPlayStatus", play_status);
+    cJSON_AddStringToObject(json, "Amount", callback->amount[0] != '\0' ? callback->amount : "0.00");
+    cJSON_AddStringToObject(json, "Language", callback->language[0] != '\0' ? callback->language : "EN");
+    cJSON_AddStringToObject(json, "Reason", callback->reason);
+    cJSON_AddStringToObject(json, "SoundPlayedOn_DateTime", dt_buf);
+
+    int ret = prv_publish_json("TXN_ACK", json);
     cJSON_Delete(json);
-    
+
     return ret;
 }
 
@@ -402,6 +420,220 @@ int customer_set_report_ntp_sync(uint8_t status)
 {
     ntp_sync = status;
     return 0;
+}
+
+uint8_t customer_get_report_ntp_sync(void)
+{
+    return ntp_sync;
+}
+
+#define TOPIC_DUX_HEALTH_STATUS "SBHealthStatus"
+
+static uint8_t s_dux_device_on_reported = 0;
+
+#define DUX_IST_OFFSET_SEC (5 * 3600 + 30 * 60) /* UTC + 5:30 (India Standard Time) */
+
+static void prv_epoch_to_datetime(time_t epoch, int *y, int *m, int *d, int *h, int *min, int *sec)
+{
+    long days = epoch / 86400;
+    long rem = epoch % 86400;
+    if (rem < 0) {
+        rem += 86400;
+        days -= 1;
+    }
+
+    *h = (int)(rem / 3600);
+    *min = (int)((rem % 3600) / 60);
+    *sec = (int)(rem % 60);
+
+    /* Civil date calculation from days since 1970-01-01 (Euclidean affine algorithm) */
+    long a = days + 719468;
+    long b = (4 * a + 3) / 146097;
+    long c = a - (146097 * b) / 4;
+    long d_calc = (4 * c + 3) / 1461;
+    long e = c - (1461 * d_calc) / 4;
+    long m_calc = (5 * e + 2) / 153;
+
+    *d = (int)(e - (153 * m_calc + 2) / 5 + 1);
+    *m = (int)(m_calc + 3 - 12 * (m_calc / 10));
+    *y = (int)(b * 100 + d_calc + (m_calc / 10));
+}
+
+void customer_dux_get_datetime_str(char *buf, size_t buf_len)
+{
+    if (!buf || buf_len == 0) return;
+
+    time_t now = time(NULL);
+    osiTime_t sys_time = {0}, rtc_time = {0};
+    osiGetSysTime(&sys_time);
+    osiGetTime(&rtc_time);
+
+    OSI_LOGI("Test-Time", "[customer_dux_get_datetime_str] Querying system datetime: time(NULL)=%ld, ntp_sync=%d",
+             (long)now, ntp_sync);
+    OSI_LOGI("Test-Time", "[customer_dux_get_datetime_str] osiGetSysTime: %04d-%02d-%02d %02d:%02d:%02d",
+             sys_time.tm_year, sys_time.tm_mon, sys_time.tm_mday,
+             sys_time.tm_hour, sys_time.tm_min, sys_time.tm_sec);
+    OSI_LOGI("Test-Time", "[customer_dux_get_datetime_str] osiGetTime (RTC): %04d-%02d-%02d %02d:%02d:%02d",
+             rtc_time.tm_year, rtc_time.tm_mon, rtc_time.tm_mday,
+             rtc_time.tm_hour, rtc_time.tm_min, rtc_time.tm_sec);
+
+    if (rtc_time.tm_year >= 2024) {
+        snprintf(buf, buf_len, "%04d-%02d-%02d %02d:%02d:%02d",
+                 rtc_time.tm_year, rtc_time.tm_mon, rtc_time.tm_mday,
+                 rtc_time.tm_hour, rtc_time.tm_min, rtc_time.tm_sec);
+        OSI_LOGI("Test-Time", "[customer_dux_get_datetime_str] Formatted DateTime string from RTC (IST): '%s'", buf);
+        return;
+    }
+
+    if (sys_time.tm_year >= 2024) {
+        snprintf(buf, buf_len, "%04d-%02d-%02d %02d:%02d:%02d",
+                 sys_time.tm_year, sys_time.tm_mon, sys_time.tm_mday,
+                 sys_time.tm_hour, sys_time.tm_min, sys_time.tm_sec);
+        OSI_LOGI("Test-Time", "[customer_dux_get_datetime_str] Formatted DateTime string from SysTime (IST): '%s'", buf);
+        return;
+    }
+
+    if (now != (time_t)-1 && now > 1577836800) { /* > 2020-01-01 */
+        int y = 0, m = 0, d = 0, h = 0, min = 0, sec = 0;
+        prv_epoch_to_datetime(now, &y, &m, &d, &h, &min, &sec);
+        snprintf(buf, buf_len, "%04d-%02d-%02d %02d:%02d:%02d", y, m, d, h, min, sec);
+        OSI_LOGI("Test-Time", "[customer_dux_get_datetime_str] Formatted DateTime string from now: '%s'", buf);
+        return;
+    }
+
+    OSI_LOGW("Test-Time", "[customer_dux_get_datetime_str] Time not yet synced (rtc_year=%d, now=%ld), fallback 1970-01-01",
+             rtc_time.tm_year, (long)now);
+    snprintf(buf, buf_len, "1970-01-01 00:00:00");
+}
+
+const char* customer_dux_get_network_quality_str(void)
+{
+    int csq = framework_network_get_csq();
+    if (csq >= 18 && csq <= 31) {
+        return "Good";
+    } else if (csq >= 10 && csq < 18) {
+        return "Normal";
+    } else {
+        return "Bad";
+    }
+}
+
+int customer_dux_publish_device_power(uint8_t is_on)
+{
+    if (!framework_mqtt_is_connected()) {
+        OSI_LOGW(TAG, "MQTT not connected, cannot publish Device ON/OFF");
+        return -1;
+    }
+
+    char sn[32] = {0};
+    framework_device_config_get_sn(sn, sizeof(sn));
+
+    char dt_buf[32] = {0};
+    customer_dux_get_datetime_str(dt_buf, sizeof(dt_buf));
+
+    char battery_str[8];
+    snprintf(battery_str, sizeof(battery_str), "%d", framework_battery_get_percent());
+
+    cJSON *json = cJSON_CreateObject();
+    if (!json) return -2;
+
+    cJSON_AddStringToObject(json, "serial_no", sn);
+    cJSON_AddStringToObject(json, "Network", customer_dux_get_network_quality_str());
+    cJSON_AddStringToObject(json, "Battery", battery_str);
+    cJSON_AddStringToObject(json, "Device_ON_OFF", is_on ? "1" : "0");
+    cJSON_AddStringToObject(json, "Device_Status_DateTime", dt_buf);
+
+    int ret = prv_publish_json(TOPIC_DUX_HEALTH_STATUS, json);
+    cJSON_Delete(json);
+    return ret;
+}
+
+int customer_dux_publish_charging_status(uint8_t is_charging)
+{
+    if (!framework_mqtt_is_connected()) {
+        OSI_LOGW(TAG, "MQTT not connected, cannot publish charging status");
+        return -1;
+    }
+
+    char sn[32] = {0};
+    framework_device_config_get_sn(sn, sizeof(sn));
+
+    char dt_buf[32] = {0};
+    customer_dux_get_datetime_str(dt_buf, sizeof(dt_buf));
+
+    char battery_str[8];
+    snprintf(battery_str, sizeof(battery_str), "%d", framework_battery_get_percent());
+
+    cJSON *json = cJSON_CreateObject();
+    if (!json) return -2;
+
+    cJSON_AddStringToObject(json, "serial_no", sn);
+    cJSON_AddStringToObject(json, "Network", customer_dux_get_network_quality_str());
+    cJSON_AddStringToObject(json, "Battery", battery_str);
+    cJSON_AddStringToObject(json, "charging_status", is_charging ? "1" : "0");
+    cJSON_AddStringToObject(json, "charging_DateTime", dt_buf);
+
+    int ret = prv_publish_json(TOPIC_DUX_HEALTH_STATUS, json);
+    cJSON_Delete(json);
+    return ret;
+}
+
+int customer_dux_publish_health_status(void)
+{
+    if (!framework_mqtt_is_connected()) {
+        OSI_LOGW(TAG, "MQTT not connected, cannot publish periodic health");
+        return -1;
+    }
+
+    char sn[32] = {0};
+    framework_device_config_get_sn(sn, sizeof(sn));
+
+    char dt_buf[32] = {0};
+    customer_dux_get_datetime_str(dt_buf, sizeof(dt_buf));
+
+    char battery_str[8];
+    snprintf(battery_str, sizeof(battery_str), "%d", framework_battery_get_percent());
+
+    cJSON *json = cJSON_CreateObject();
+    if (!json) return -2;
+
+    cJSON_AddStringToObject(json, "serial_no", sn);
+    cJSON_AddStringToObject(json, "Network", customer_dux_get_network_quality_str());
+    cJSON_AddStringToObject(json, "Battery", battery_str);
+    cJSON_AddStringToObject(json, "Device_Status_DateTime", dt_buf);
+
+    int ret = prv_publish_json(TOPIC_DUX_HEALTH_STATUS, json);
+    ret=prv_send_json(json);
+    cJSON_Delete(json);
+    return ret;
+}
+
+void customer_dux_check_and_publish_device_on(void)
+{
+    OSI_LOGI("Test-Time", "[customer_dux_check_and_publish_device_on] Evaluating: reported=%d, mqtt_conn=%d, ntp_sync=%d",
+             s_dux_device_on_reported, framework_mqtt_is_connected(), ntp_sync);
+
+    if (s_dux_device_on_reported) {
+        return;
+    }
+
+    if (!framework_mqtt_is_connected()) {
+        OSI_LOGI("Test-Time", "[customer_dux_check_and_publish_device_on] MQTT not connected yet, holding Device ON report");
+        return;
+    }
+
+    if (!ntp_sync) {
+        OSI_LOGI("Test-Time", "[customer_dux_check_and_publish_device_on] NTP not synced yet, holding Device ON report for valid timestamp");
+        return;
+    }
+
+    OSI_LOGI("Test-Time", "[customer_dux_check_and_publish_device_on] Conditions MET (MQTT connected & NTP synced)! Publishing Device ON now...");
+    if (customer_dux_publish_device_power(1) == 0) {
+        s_dux_device_on_reported = 1;
+        OSI_LOGI("Test-Time", "[customer_dux_check_and_publish_device_on] Device ON successfully published to SBHealthStatus");
+    } else {
+        OSI_LOGE("Test-Time", "[customer_dux_check_and_publish_device_on] Failed to publish Device ON to SBHealthStatus");
+    }
 }
 
 /* ============================================================================

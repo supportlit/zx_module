@@ -8,6 +8,7 @@
 #include "framework_http.h"
 #include "framework_log.h"
 #include "framework_mqtt.h"
+#include "framework_network.h"
 #include "framework_msg.h"
 #include "framework_unzip.h"
 #include "fs_api.h"
@@ -373,6 +374,18 @@ static int template_load_certificates_from_files(void) {
   return 0;
 }
 
+static char *prv_str_trim(char *str) {
+  if (!str) return "";
+  while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n') str++;
+  if (*str == 0) return str;
+  char *end = str + strlen(str) - 1;
+  while (end > str && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+    *end = '\0';
+    end--;
+  }
+  return str;
+}
+
 static void template_handle_server_message(const char *topic,
                                            const char *payload,
                                            uint32_t payload_len) {
@@ -382,6 +395,89 @@ static void template_handle_server_message(const char *topic,
   memcpy(buf, payload, payload_len);
   buf[payload_len] = 0;
 
+  // Handle pipe-delimited payment messages:
+  // Format: Language|Mode of payment|Amount|...|Transaction Id
+  // e.g. "EN|UPI|1590.00| | |415857764147"
+  if (strchr(buf, '|')) {
+    char *tokens[10] = {0};
+    int token_count = 0;
+    char temp_buf[512];
+    strncpy(temp_buf, buf, sizeof(temp_buf) - 1);
+    temp_buf[sizeof(temp_buf) - 1] = '\0';
+
+    char *p = temp_buf;
+    while (p && token_count < 10) {
+      tokens[token_count++] = p;
+      char *next = strchr(p, '|');
+      if (next) {
+        *next = '\0';
+        p = next + 1;
+      } else {
+        break;
+      }
+    }
+
+    for (int i = 0; i < token_count; i++) {
+      tokens[i] = prv_str_trim(tokens[i]);
+    }
+
+    if (token_count >= 3) {
+      const char *lang_str = (token_count > 0 && tokens[0][0] != '\0') ? tokens[0] : "EN";
+      const char *mode = (token_count > 1) ? tokens[1] : "";
+      const char *amount_str = (token_count > 2) ? tokens[2] : "0.00";
+
+      // Find transaction id from remaining tokens (e.g. token[5] or token[3])
+      const char *transaction_id = "";
+      for (int i = token_count - 1; i >= 3; i--) {
+        if (tokens[i][0] != '\0') {
+          transaction_id = tokens[i];
+          break;
+        }
+      }
+
+      double amount_val = atof(amount_str);
+      uint64_t rupees = (uint64_t)amount_val;
+      uint32_t paise = (uint32_t)((amount_val - (double)rupees) * 100.0 + 0.5);
+      if (paise >= 100) {
+        rupees += 1;
+        paise = 0;
+      }
+
+      OSI_LOGI(TAG,
+               "[PIPE-PAYMENT] lang=%s, mode=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), txn_id=%s",
+               lang_str, mode, amount_str, amount_val,
+               (unsigned long long)rupees, (unsigned long)paise, transaction_id);
+
+      payment_broadcast_params_t params = {0};
+      params.amount = rupees;
+      params.rupees = rupees;
+      params.paise = paise;
+      params.total_amount = amount_val;
+      strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
+      strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
+      strncpy(params.language, lang_str, sizeof(params.language) - 1);
+
+      int ret = customer_payment_broadcast(&params);
+      if (ret != 0) {
+        payment_callback_t callback = {0};
+        strncpy(callback.serial_number, sn, sizeof(callback.serial_number) - 1);
+        strncpy(callback.status, "0", sizeof(callback.status) - 1);
+        strncpy(callback.transaction_id, transaction_id, sizeof(callback.transaction_id) - 1);
+        strncpy(callback.amount, amount_str, sizeof(callback.amount) - 1);
+        strncpy(callback.language, lang_str, sizeof(callback.language) - 1);
+        strncpy(callback.reason, "Broadcast failed", sizeof(callback.reason) - 1);
+        osiTime_t now = {0};
+        osiGetTime(&now);
+        snprintf(callback.sound_played_datetime, sizeof(callback.sound_played_datetime),
+                 "%04d-%02d-%02d %02d:%02d:%02d",
+                 now.tm_year, now.tm_mon, now.tm_mday,
+                 now.tm_hour, now.tm_min, now.tm_sec);
+        customer_status_report_payment(&callback);
+      }
+      return;
+    }
+  }
+
   cJSON *root = cJSON_Parse(buf);
   if (!root) {
     OSI_LOGI(TAG, "[JSON] Parse error: %s", buf);
@@ -390,20 +486,32 @@ static void template_handle_server_message(const char *topic,
 
   if (strstr(topic, "/payment") || strstr(topic, "pebble") ||
       strstr(topic, "pebble_screen") || strstr(topic, "pocket") || strstr(topic, "neo")) {
-    // {"transaction_id":"...", "amount":..., "status":"SUCCESS"}
+    // Support both Hitachi TMS ("TxnId", "Amount", "Language") and legacy ("transaction_id", "amount", "language")
     const cJSON *j_id = cJSON_GetObjectItem(root, "transaction_id");
+    if (!j_id) {
+      j_id = cJSON_GetObjectItem(root, "TxnId");
+    }
     const cJSON *j_amount = cJSON_GetObjectItem(root, "amount");
+    if (!j_amount) {
+      j_amount = cJSON_GetObjectItem(root, "Amount");
+    }
     const cJSON *j_status = cJSON_GetObjectItem(root, "status");
+    const cJSON *j_lang = cJSON_GetObjectItem(root, "language");
+    if (!j_lang) {
+      j_lang = cJSON_GetObjectItem(root, "Language");
+    }
     const char *transaction_id =
         j_id && cJSON_IsString(j_id) ? j_id->valuestring : "";
-    // add by vipin: parse amount supporting float number, string and integer
-    // (e.g. 12.50, "12.50", 12)
+
+    char amount_str[16] = {0};
     double amount_val = 0.0;
     if (j_amount) {
       if (cJSON_IsNumber(j_amount)) {
         amount_val = j_amount->valuedouble;
+        snprintf(amount_str, sizeof(amount_str), "%.2f", amount_val);
       } else if (cJSON_IsString(j_amount) && j_amount->valuestring) {
-        amount_val = atof(j_amount->valuestring);
+        strncpy(amount_str, j_amount->valuestring, sizeof(amount_str) - 1);
+        amount_val = atof(amount_str);
       }
     }
     uint64_t rupees = (uint64_t)amount_val;
@@ -413,25 +521,40 @@ static void template_handle_server_message(const char *topic,
       paise = 0;
     }
 
+    const char *lang_str = (j_lang && cJSON_IsString(j_lang)) ? j_lang->valuestring : "EN";
+
     const char *status =
         j_status && cJSON_IsString(j_status) ? j_status->valuestring : "";
     OSI_LOGI(TAG,
-             "[PAYMENT] id=%s, amount=%.2f (rupees=%llu, paise=%lu), status=%s",
-             transaction_id, amount_val, (unsigned long long)rupees,
-             (unsigned long)paise, status); // add by vipin
+             "[PAYMENT] id=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), lang=%s, status=%s",
+             transaction_id, amount_str, amount_val, (unsigned long long)rupees,
+             (unsigned long)paise, lang_str, status); // add by vipin
     payment_broadcast_params_t params = {0};
     params.amount = rupees; // add by vipin: legacy integer field compatibility
     params.rupees = rupees; // add by vipin: integer rupee portion
     params.paise = paise;   // add by vipin: integer paise portion (0-99)
     params.total_amount = amount_val; // add by vipin: full amount float/double
+    strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
+    strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
+    strncpy(params.language, lang_str, sizeof(params.language) - 1);
     int ret = customer_payment_broadcast(&params);
-    payment_callback_t callback = {0};
-    strncpy(callback.serial_number, sn, sizeof(callback.serial_number) - 1);
-    strncpy(callback.status, ret == 0 ? "SUCCESS" : "FAILURE",
-            sizeof(callback.status) - 1);
-    strncpy(callback.transaction_id, transaction_id,
-            sizeof(callback.transaction_id) - 1);
-    customer_status_report_payment(&callback);
+    if (ret != 0) {
+      payment_callback_t callback = {0};
+      strncpy(callback.serial_number, sn, sizeof(callback.serial_number) - 1);
+      strncpy(callback.status, "0", sizeof(callback.status) - 1); // 0 = Failure
+      strncpy(callback.transaction_id, transaction_id, sizeof(callback.transaction_id) - 1);
+      strncpy(callback.amount, amount_str, sizeof(callback.amount) - 1);
+      strncpy(callback.language, lang_str, sizeof(callback.language) - 1);
+      strncpy(callback.reason, "Broadcast failed", sizeof(callback.reason) - 1);
+      osiTime_t now = {0};
+      osiGetTime(&now);
+      snprintf(callback.sound_played_datetime, sizeof(callback.sound_played_datetime), "%04d-%02d-%02d %02d:%02d:%02d",
+               now.tm_year, now.tm_mon, now.tm_mday,
+               now.tm_hour, now.tm_min, now.tm_sec);
+      customer_status_report_payment(&callback);
+    }
+    // Note: On success (ret == 0), transaction ACK is sent automatically
+    // when audio finishes playing via prv_payment_audio_playback_callback
   } else if (strstr(topic, "/sound-update")) {
     const cJSON *j_url = cJSON_GetObjectItemCaseSensitive(root, "url");
     const cJSON *j_md5 = cJSON_GetObjectItemCaseSensitive(root, "MD5");
@@ -519,30 +642,28 @@ static void template_mqtt_event_callback(mqtt_event_e event, void *data) {
       OSI_LOGI(TAG, "Subscribe %s: %d", sub_topic[i], ret);
     }
 
-    // Start status reporting after MQTT connection is established
-    OSI_LOGI(TAG, "Starting status report (interval: 30 sec)");
-    customer_status_report_start(30);
+    // Start status reporting after MQTT connection is established (1 min interval)
+    OSI_LOGI(TAG, "Starting status report (interval: 1 min / 60 sec)");
+    customer_status_report_start(60);
   } else if (event == MQTT_EVENT_DISCONNECTED) {
     OSI_LOGW(TAG, "MQTT disconnected, stopping status report");
     // customer_status_report_stop();
   }
 }
 
-static int customer_mqtt_message_handler(const char *topic, const char *payload,
+OSI_UNUSED static int customer_mqtt_message_handler(const char *topic, const char *payload,
                                          uint32_t payload_len) {
   if (!payload || payload_len == 0)
     return -1;
   OSI_LOGI(TAG, "Received command: %.*s", (int)payload_len, payload);
-  // TODO: 解析 payload 并调用 customer_payment_broadcast
   return 0;
 }
 
-static void template_mqtt_reconnect_handler(uint32_t reconnect_date) {
-  static int reconnect_count_list[10] = {5,   10,  30,  60,   120,
-                                         240, 360, 720, 1440, 2880};
+static void template_mqtt_reconnect_handler(void *data) {
+  (void)data;
   OSI_LOGI(TAG,
-           "MQTT reconnect handler called, reconnect_date=%d is_connected=%d",
-           reconnect_date, framework_network_is_connected());
+           "MQTT reconnect handler called, is_connected=%d",
+           framework_network_is_connected());
   while (!framework_network_is_connected()) {
     osiThreadSleep(200);
   }

@@ -20,7 +20,7 @@
 #define TAG "FRAMEWORK_MSG"
 
 #define MSG_TASK_PRIORITY 100   /**< Message processing task priority */
-#define MSG_TASK_STACK_SIZE (10*1024) /**< Message processing task stack size */
+#define MSG_TASK_STACK_SIZE (20*1024) /**< Message processing task stack size */
 
 /**
  * @brief Message Management Context Structure

@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stddef.h>
 
 /**
  * @brief Connection type enumeration
@@ -72,9 +73,13 @@ typedef struct {
  * @brief Payment callback structure
  */
 typedef struct {
-    char serial_number[32];           /**< Device serial number */
-    char transaction_id[64];          /**< Transaction ID */
-    char status[16];                  /**< Status: SUCCESS/FAILURE */
+    char serial_number[32];           /**< Device serial number (serial_no) */
+    char transaction_id[64];          /**< Transaction ID (TxnId) */
+    char status[16];                  /**< SoundPlayStatus: "1" or "0" or "SUCCESS"/"FAILURE" */
+    char amount[16];                  /**< Amount string (e.g. "16.32") */
+    char language[8];                 /**< Language (e.g. "EN") */
+    char reason[32];                  /**< Reason ("" on success, error msg on fail) */
+    char sound_played_datetime[32];   /**< Datetime "YYYY-MM-DD HH:MM:SS" */
 } payment_callback_t;
 
 /**
@@ -148,6 +153,57 @@ int customer_tms_heartbeat_start(uint32_t interval_sec);
  * @return 0 on success
  */
 int customer_tms_heartbeat_stop(void);
+
+/**
+ * @brief Get formatted date-time string ("YYYY-MM-DD HH:MM:SS")
+ * @param buf Output buffer
+ * @param buf_len Size of buffer
+ */
+void customer_dux_get_datetime_str(char *buf, size_t buf_len);
+
+/**
+ * @brief Get network quality string ("Good", "Normal", "Bad")
+ * @return String constant
+ */
+const char* customer_dux_get_network_quality_str(void);
+
+/**
+ * @brief Publish Device ON/OFF event to SBHealthStatus topic
+ * @param is_on 1 for Device ON, 0 for Device OFF (shutdown)
+ * @return 0 on success, negative on error
+ */
+int customer_dux_publish_device_power(uint8_t is_on);
+
+/**
+ * @brief Publish Charging/Discharging event to SBHealthStatus topic
+ * @param is_charging 1 for connected, 0 for disconnected
+ * @return 0 on success, negative on error
+ */
+int customer_dux_publish_charging_status(uint8_t is_charging);
+
+/**
+ * @brief Publish 15-minute Periodic Health Status to SBHealthStatus topic
+ * @return 0 on success, negative on error
+ */
+int customer_dux_publish_health_status(void);
+
+/**
+ * @brief Check if both MQTT and NTP are ready, and publish initial Device ON event
+ */
+void customer_dux_check_and_publish_device_on(void);
+
+/**
+ * @brief Get whether NTP sync has been completed
+ * @return 1 if synced, 0 if not
+ */
+uint8_t customer_get_report_ntp_sync(void);
+
+/**
+ * @brief Set NTP sync state
+ * @param status 1 for synced, 0 for not synced
+ * @return 0 on success
+ */
+int customer_set_report_ntp_sync(uint8_t status);
 
 #ifdef __cplusplus
 }

@@ -158,7 +158,11 @@ static void prv_ntp_schedule(uint32_t delay_ms)
 
 static framework_ntp_result_e prv_ntp_sync_one(const char *server, uint32_t timeout_ms, time_t *out_time)
 {
+    OSI_LOGI("Test-Time", "[prv_ntp_sync_one] Starting NTP sync with server='%s', timeout=%u ms",
+             server ? server : "(null)", (unsigned int)timeout_ms);
+
     if (server == NULL || server[0] == '\0' || out_time == NULL) {
+        OSI_LOGE("Test-Time", "[prv_ntp_sync_one] Invalid arguments (server is NULL or empty, or out_time is NULL)");
         return FRAMEWORK_NTP_ERR_DNS;
     }
 
@@ -169,15 +173,28 @@ static framework_ntp_result_e prv_ntp_sync_one(const char *server, uint32_t time
     hints.ai_protocol = IPPROTO_UDP;
 
     struct addrinfo *res = NULL;
+    OSI_LOGI("Test-Time", "[prv_ntp_sync_one] Calling getaddrinfo for server '%s', port '%s'...",
+             server, FRAMEWORK_NTP_PORT_STR);
     int ret = getaddrinfo(server, FRAMEWORK_NTP_PORT_STR, &hints, &res);
     if (ret != 0 || res == NULL) {
+        OSI_LOGE("Test-Time", "[prv_ntp_sync_one] DNS resolution failed for '%s', ret=%d, res=%p",
+                 server, ret, res);
         return FRAMEWORK_NTP_ERR_DNS;
     }
 
+    OSI_LOGI("Test-Time", "[prv_ntp_sync_one] DNS resolution succeeded for '%s'", server);
+
     framework_ntp_result_e last_err = FRAMEWORK_NTP_ERR_SOCKET;
-    for (struct addrinfo *p = res; p != NULL; p = p->ai_next) {
+    int addr_idx = 0;
+    for (struct addrinfo *p = res; p != NULL; p = p->ai_next, addr_idx++) {
+        struct sockaddr_in *ipv4 = (struct sockaddr_in *)p->ai_addr;
+        char *ip_str = inet_ntoa(ipv4->sin_addr);
+        OSI_LOGI("Test-Time", "[prv_ntp_sync_one] Address #%d: IP=%s, port=%u",
+                 addr_idx, ip_str ? ip_str : "unknown", (unsigned int)ntohs(ipv4->sin_port));
+
         int sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (sock < 0) {
+            OSI_LOGE("Test-Time", "[prv_ntp_sync_one] Failed to create UDP socket: fd=%d", sock);
             last_err = FRAMEWORK_NTP_ERR_SOCKET;
             continue;
         }
@@ -190,6 +207,7 @@ static framework_ntp_result_e prv_ntp_sync_one(const char *server, uint32_t time
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
         if (connect(sock, p->ai_addr, p->ai_addrlen) < 0) {
+            OSI_LOGE("Test-Time", "[prv_ntp_sync_one] UDP connect failed to %s", ip_str ? ip_str : "addr");
             last_err = FRAMEWORK_NTP_ERR_SOCKET;
             closesocket(sock);
             continue;
@@ -199,13 +217,20 @@ static framework_ntp_result_e prv_ntp_sync_one(const char *server, uint32_t time
         memset(&packet, 0, sizeof(packet));
         packet.li_vn_mode = 0x1b; /* LI=0, VN=3, Mode=3 (client) */
 
+        OSI_LOGI("Test-Time", "[prv_ntp_sync_one] Sending 48-byte NTP request packet to %s...", ip_str ? ip_str : "addr");
         if (send(sock, &packet, sizeof(packet), 0) < 0) {
+            OSI_LOGE("Test-Time", "[prv_ntp_sync_one] Failed to send NTP request to %s", ip_str ? ip_str : "addr");
             last_err = FRAMEWORK_NTP_ERR_SEND;
             closesocket(sock);
             continue;
         }
 
-        if (recv(sock, &packet, sizeof(packet), 0) < 0) {
+        OSI_LOGI("Test-Time", "[prv_ntp_sync_one] Waiting for NTP reply from %s (timeout=%u ms)...",
+                 ip_str ? ip_str : "addr", (unsigned int)timeout_ms);
+        int recv_bytes = recv(sock, &packet, sizeof(packet), 0);
+        if (recv_bytes < 0) {
+            OSI_LOGE("Test-Time", "[prv_ntp_sync_one] recv failed or timed out from %s, ret=%d",
+                     ip_str ? ip_str : "addr", recv_bytes);
             last_err = FRAMEWORK_NTP_ERR_RECV;
             closesocket(sock);
             continue;
@@ -214,46 +239,130 @@ static framework_ntp_result_e prv_ntp_sync_one(const char *server, uint32_t time
         closesocket(sock);
 
         uint32_t secs = ntohl(packet.trans_ts_sec);
+        uint32_t frac = ntohl(packet.trans_ts_frac);
+        OSI_LOGI("Test-Time", "[prv_ntp_sync_one] Received %d bytes from %s: trans_ts_sec=%lu (0x%lx), trans_ts_frac=%lu",
+                 recv_bytes, ip_str ? ip_str : "addr", (unsigned long)secs, (unsigned long)secs, (unsigned long)frac);
+
         if (secs == 0 || secs <= FRAMEWORK_NTP_TIMESTAMP_DELTA) {
+            OSI_LOGE("Test-Time", "[prv_ntp_sync_one] Bad timestamp in reply: %lu <= delta %llu",
+                     (unsigned long)secs, (unsigned long long)FRAMEWORK_NTP_TIMESTAMP_DELTA);
             last_err = FRAMEWORK_NTP_ERR_BAD_RESPONSE;
             continue;
         }
 
         *out_time = (time_t)(secs - FRAMEWORK_NTP_TIMESTAMP_DELTA);
+        OSI_LOGI("Test-Time", "[prv_ntp_sync_one] SUCCESS! Parsed UNIX epoch timestamp: %ld (0x%lx)",
+                 (long)(*out_time), (unsigned long)(*out_time));
         freeaddrinfo(res);
         return FRAMEWORK_NTP_RESULT_OK;
     }
 
     freeaddrinfo(res);
+    OSI_LOGE("Test-Time", "[prv_ntp_sync_one] All addresses for server '%s' failed, last_err=%d", server, last_err);
     return last_err;
 }
 
+#define IST_TIMEZONE_OFFSET_SEC (5 * 3600 + 30 * 60) /* +5:30 = 19800 seconds */
+
 static void prv_ntp_apply_time(time_t ts)
 {
-    osiTime_t stime = {0};
-    // set system time
-    if(osiGetTimeZone() != 8){osiSetTimeZoneMin(8*60);}
-    struct tm *ntp_time = localtime(&ts);
-    memset(&stime, 0, sizeof(osiTime_t));
-    stime.tm_year = ntp_time->tm_year + 1900;
-    stime.tm_mon = ntp_time->tm_mon+1;
-    stime.tm_mday = ntp_time->tm_mday;
-    stime.tm_hour = ntp_time->tm_hour;
-    stime.tm_min = ntp_time->tm_min;
-    stime.tm_sec = ntp_time->tm_sec;
-    osiSetSysTime(&stime);
-    OSI_LOGI(TAG, "NTP time applied: %s", asctime(ntp_time));
+    osiTime_t before_sys = {0}, before_rtc = {0};
+    osiGetSysTime(&before_sys);
+    osiGetTime(&before_rtc);
+    time_t before_time = time(NULL);
+
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] ========== APPLYING NTP TIME ==========");
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Input UTC NTP timestamp ts=%ld (0x%lx)", (long)ts, (unsigned long)ts);
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] BEFORE SET: time(NULL)=%ld", (long)before_time);
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] BEFORE SET: osiGetTimeZoneMin()=%ld", (long)osiGetTimeZoneMin());
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] BEFORE SET: SysTime=%04d-%02d-%02d %02d:%02d:%02d",
+             before_sys.tm_year, before_sys.tm_mon, before_sys.tm_mday,
+             before_sys.tm_hour, before_sys.tm_min, before_sys.tm_sec);
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] BEFORE SET: RtcTime=%04d-%02d-%02d %02d:%02d:%02d",
+             before_rtc.tm_year, before_rtc.tm_mon, before_rtc.tm_mday,
+             before_rtc.tm_hour, before_rtc.tm_min, before_rtc.tm_sec);
+
+    /* Set Indian Standard Time timezone in RTOS: +5:30 = 330 minutes */
+    if (osiGetTimeZoneMin() != 330) {
+        OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Setting RTOS timezone to IST (330 min)");
+        osiSetTimeZoneMin(5 * 60 + 30);
+    }
+
+    /* Convert UTC NTP timestamp to IST (+5:30 = 19800 seconds) */
+    time_t ist_ts = ts + IST_TIMEZONE_OFFSET_SEC;
+    struct tm *ist_tm = gmtime(&ist_ts);
+
+    if (ist_tm) {
+        OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Calculated IST datetime: %04d-%02d-%02d %02d:%02d:%02d",
+                 ist_tm->tm_year + 1900, ist_tm->tm_mon + 1, ist_tm->tm_mday,
+                 ist_tm->tm_hour, ist_tm->tm_min, ist_tm->tm_sec);
+
+        /* 1. Set Hardware RTC directly to IST (osiSetTime) */
+        osiTime_t rtc_time = {0};
+        rtc_time.tm_year = ist_tm->tm_year + 1900;
+        rtc_time.tm_mon  = ist_tm->tm_mon + 1;
+        rtc_time.tm_mday = ist_tm->tm_mday;
+        rtc_time.tm_hour = ist_tm->tm_hour;
+        rtc_time.tm_min  = ist_tm->tm_min;
+        rtc_time.tm_sec  = ist_tm->tm_sec;
+
+        OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Setting IST to Hardware RtcTime: %04d-%02d-%02d %02d:%02d:%02d",
+                 rtc_time.tm_year, rtc_time.tm_mon, rtc_time.tm_mday,
+                 rtc_time.tm_hour, rtc_time.tm_min, rtc_time.tm_sec);
+        osiSetTime(&rtc_time);
+
+        /* 2. Set System time (osiSetSysTime).
+         * osiSetSysTime internally subtracts 8 hours (kernel UTC+8 conversion)
+         * from its input and modifies the struct in place. To make SysTime equal to IST,
+         * we feed (IST + 8 hours) so that after the internal -8h conversion, SysTime == IST. */
+        time_t sys_feed_ts = ist_ts + (8 * 3600);
+        struct tm *sys_feed_tm = gmtime(&sys_feed_ts);
+        if (sys_feed_tm) {
+            osiTime_t sys_time = {0};
+            sys_time.tm_year = sys_feed_tm->tm_year + 1900;
+            sys_time.tm_mon  = sys_feed_tm->tm_mon + 1;
+            sys_time.tm_mday = sys_feed_tm->tm_mday;
+            sys_time.tm_hour = sys_feed_tm->tm_hour;
+            sys_time.tm_min  = sys_feed_tm->tm_min;
+            sys_time.tm_sec  = sys_feed_tm->tm_sec;
+
+            OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Setting IST to SysTime (feed +8h: %04d-%02d-%02d %02d:%02d:%02d)",
+                     sys_time.tm_year, sys_time.tm_mon, sys_time.tm_mday,
+                     sys_time.tm_hour, sys_time.tm_min, sys_time.tm_sec);
+            osiSetSysTime(&sys_time);
+        }
+    } else {
+        OSI_LOGE("Test-Time", "[prv_ntp_apply_time] ERROR: gmtime(&ist_ts) returned NULL!");
+    }
+
+    osiTime_t after_sys = {0}, after_rtc = {0};
+    osiGetSysTime(&after_sys);
+    osiGetTime(&after_rtc);
+    time_t after_time = time(NULL);
+
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] AFTER SET: time(NULL)=%ld", (long)after_time);
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] AFTER SET: SysTime=%04d-%02d-%02d %02d:%02d:%02d",
+             after_sys.tm_year, after_sys.tm_mon, after_sys.tm_mday,
+             after_sys.tm_hour, after_sys.tm_min, after_sys.tm_sec);
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] AFTER SET: RtcTime=%04d-%02d-%02d %02d:%02d:%02d",
+             after_rtc.tm_year, after_rtc.tm_mon, after_rtc.tm_mday,
+             after_rtc.tm_hour, after_rtc.tm_min, after_rtc.tm_sec);
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] ==========================================");
 }
 
 static void prv_ntp_work_handler(void *param)
 {
     (void)param;
+    OSI_LOGI("Test-Time", "[prv_ntp_work_handler] Worker triggered: server_count=%u, net_connected=%d",
+             (unsigned int)g_network_ctx.ntp.server_count, framework_network_is_connected());
 
     if (g_network_ctx.ntp.server_count == 0) {
+        OSI_LOGW("Test-Time", "[prv_ntp_work_handler] No NTP servers configured");
         return;
     }
 
     if (!framework_network_is_connected()) {
+        OSI_LOGW("Test-Time", "[prv_ntp_work_handler] Network not connected! Sending MSG_NET_NTP_FAILURE");
         framework_msg_t msg = {
             .id = MSG_NET_NTP_FAILURE,
             .param1 = 0,
@@ -272,8 +381,14 @@ static void prv_ntp_work_handler(void *param)
 
     while (attempts < g_network_ctx.ntp.server_count) {
         const char *server = g_network_ctx.ntp.servers[idx];
+        OSI_LOGI("Test-Time", "[prv_ntp_work_handler] Attempt %u/%u: Trying server[%u]='%s'",
+                 (unsigned int)(attempts + 1), (unsigned int)g_network_ctx.ntp.server_count,
+                 (unsigned int)idx, server ? server : "(null)");
+
         framework_ntp_result_e ret = prv_ntp_sync_one(server, g_network_ctx.ntp.timeout_ms, &ts);
         if (ret == FRAMEWORK_NTP_RESULT_OK) {
+            OSI_LOGI("Test-Time", "[prv_ntp_work_handler] Sync OK from server '%s'! epoch ts=%ld",
+                     server, (long)ts);
             prv_ntp_apply_time(ts);
             g_network_ctx.ntp.current_index = idx;
 
@@ -283,18 +398,23 @@ static void prv_ntp_work_handler(void *param)
                 .param2 = (uint32_t)ts,
                 .param3 = 0,
             };
+            OSI_LOGI("Test-Time", "[prv_ntp_work_handler] Sending MSG_NET_NTP_SUCCESS (idx=%u, ts=%ld)",
+                     (unsigned int)idx, (long)ts);
             framework_msg_send(&msg);
 
             prv_ntp_schedule(g_network_ctx.ntp.interval_ms);
             return;
         }
 
+        OSI_LOGW("Test-Time", "[prv_ntp_work_handler] Server '%s' sync failed, ret=%d", server, ret);
         last_err = ret;
         idx = (idx + 1) % g_network_ctx.ntp.server_count;
         attempts++;
     }
 
     size_t failed_idx = (idx + g_network_ctx.ntp.server_count - 1) % g_network_ctx.ntp.server_count;
+    OSI_LOGE("Test-Time", "[prv_ntp_work_handler] ALL %u servers failed! Sending MSG_NET_NTP_FAILURE (last_err=%d)",
+             (unsigned int)g_network_ctx.ntp.server_count, last_err);
     framework_msg_t msg = {
         .id = MSG_NET_NTP_FAILURE,
         .param1 = (uint32_t)failed_idx,
@@ -908,10 +1028,10 @@ int framework_network_init(void)
     g_network_ctx.ntp.work = osiWorkCreate(prv_ntp_work_handler, NULL, NULL);
     g_network_ctx.ntp.interval_ms = FRAMEWORK_NTP_DEFAULT_INTERVAL_MS;
     g_network_ctx.ntp.timeout_ms = FRAMEWORK_NTP_DEFAULT_TIMEOUT_MS;
-    static const char *default_ntp[] = {"pool.ntp.org", "time.google.com"};
+    static const char *default_ntp[] = {"pool.ntp.org", "time.google.com", "in.pool.ntp.org"};
     framework_ntp_config_t ntp_cfg = {
-        .servers = {default_ntp[0], default_ntp[1]},
-        .server_count = 2,
+        .servers = {default_ntp[0], default_ntp[1], default_ntp[2]},
+        .server_count = 3,
         .interval_seconds = FRAMEWORK_NTP_DEFAULT_INTERVAL_MS / 1000U,
         .timeout_ms = FRAMEWORK_NTP_DEFAULT_TIMEOUT_MS,
     };
@@ -1519,20 +1639,30 @@ int framework_network_ntp_configure(const framework_ntp_config_t *config)
 
 int framework_network_ntp_sync_now(bool sync)
 {
+    OSI_LOGI("Test-Time", "[framework_network_ntp_sync_now] ENTER: sync=%d, server_count=%u, is_connected=%d",
+             sync, (unsigned int)g_network_ctx.ntp.server_count, framework_network_is_connected());
+
+    for (size_t i = 0; i < g_network_ctx.ntp.server_count; i++) {
+        OSI_LOGI("Test-Time", "[framework_network_ntp_sync_now] Server[%u]='%s'",
+                 (unsigned int)i, g_network_ctx.ntp.servers[i]);
+    }
+
     if (g_network_ctx.ntp.server_count == 0 || g_network_ctx.ntp.work == NULL) {
+        OSI_LOGE("Test-Time", "[framework_network_ntp_sync_now] Abort: server_count=0 or work=NULL");
         return -1;
     }
 
     /* Async path (default): enqueue work like before */
     if (!sync) {
-        // prv_ntp_schedule(1);
+        OSI_LOGI("Test-Time", "[framework_network_ntp_sync_now] Async mode requested: enqueuing work to osiSysWorkQueueLowPriority()");
         osiWorkEnqueue(g_network_ctx.ntp.work, osiSysWorkQueueLowPriority());
         return 0;
     }
 
     /* Sync path: perform immediate NTP sync on current server list */
+    OSI_LOGI("Test-Time", "[framework_network_ntp_sync_now] Synchronous mode requested: executing immediate sync");
     if (!framework_network_is_connected()) {
-        OSI_LOGW(TAG, "NTP sync skipped: network not connected");
+        OSI_LOGW("Test-Time", "[framework_network_ntp_sync_now] NTP sync skipped: network not connected");
         return -1;
     }
 
@@ -1542,8 +1672,14 @@ int framework_network_ntp_sync_now(bool sync)
 
     for (size_t attempts = 0; attempts < g_network_ctx.ntp.server_count; attempts++) {
         const char *server = g_network_ctx.ntp.servers[idx];
+        OSI_LOGI("Test-Time", "[framework_network_ntp_sync_now] Sync attempt %u/%u with server[%u]='%s'",
+                 (unsigned int)(attempts + 1), (unsigned int)g_network_ctx.ntp.server_count,
+                 (unsigned int)idx, server ? server : "(null)");
+
         framework_ntp_result_e ret = prv_ntp_sync_one(server, g_network_ctx.ntp.timeout_ms, &ts);
         if (ret == FRAMEWORK_NTP_RESULT_OK) {
+            OSI_LOGI("Test-Time", "[framework_network_ntp_sync_now] Sync SUCCESS from server '%s', ts=%ld! Applying time...",
+                     server, (long)ts);
             prv_ntp_apply_time(ts);
             g_network_ctx.ntp.current_index = idx;
 
@@ -1553,17 +1689,22 @@ int framework_network_ntp_sync_now(bool sync)
                 .param2 = (uint32_t)ts,
                 .param3 = 0,
             };
+            OSI_LOGI("Test-Time", "[framework_network_ntp_sync_now] Sending MSG_NET_NTP_SUCCESS (idx=%u, ts=%ld)",
+                     (unsigned int)idx, (long)ts);
             framework_msg_send(&msg);
             prv_ntp_schedule(g_network_ctx.ntp.interval_ms);
             return 0;
         }
 
+        OSI_LOGW("Test-Time", "[framework_network_ntp_sync_now] Server '%s' failed, ret=%d", server, ret);
         last_err = ret;
         idx = (idx + 1) % g_network_ctx.ntp.server_count;
     }
 
     /* All servers failed */
     size_t failed_idx = (idx + g_network_ctx.ntp.server_count - 1) % g_network_ctx.ntp.server_count;
+    OSI_LOGE("Test-Time", "[framework_network_ntp_sync_now] All %u NTP servers failed synchronously! Sending MSG_NET_NTP_FAILURE (last_err=%d)",
+             (unsigned int)g_network_ctx.ntp.server_count, last_err);
     framework_msg_t msg = {
         .id = MSG_NET_NTP_FAILURE,
         .param1 = (uint32_t)failed_idx,
