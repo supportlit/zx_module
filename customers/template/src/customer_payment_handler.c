@@ -30,188 +30,461 @@ static int prv_add_audio_name(char *buf, size_t buf_size, const char *filename) 
     return 0;
 }
 
-// add by vipin: helper to check and append currency audio (checks both id_ prefixed and plain name)
-static int prv_add_currency_audio(char *buf, size_t buf_size, const char *preferred, const char *fallback) {
-    char full_path[128];
-    const char *prefix = audio_resource_get_language_prefix();
-    if (!prefix) prefix = "D:/FEMALE/";
+#define AUDIO_FOLDER_PATH "D:/FEMALE/"
 
-    if (preferred) {
-        snprintf(full_path, sizeof(full_path), "%s%s", prefix, preferred);
+// add by vipin: audio folder is strictly D:/FEMALE/ with no subdirectories
+
+// add by vipin: helper to check file existence with language variations in D:/FEMALE/
+static bool prv_try_file_with_lang(char *buf, size_t buf_size, const char *folder, const char *fname, const char *lang) {
+    char full_path[128];
+    if (lang && lang[0] != '\0') {
+        char base[64] = {0};
+        strncpy(base, fname, sizeof(base) - 1);
+        char *ext = strrchr(base, '.');
+        if (ext) *ext = '\0';
+
+        char cand[64];
+        char lang_upper[16] = {0};
+        char lang_lower[16] = {0};
+        for (int i = 0; lang[i] && i < (int)sizeof(lang_upper) - 1; i++) {
+            lang_upper[i] = (lang[i] >= 'a' && lang[i] <= 'z') ? (lang[i] - ('a' - 'A')) : lang[i];
+            lang_lower[i] = (lang[i] >= 'A' && lang[i] <= 'Z') ? (lang[i] + ('a' - 'A')) : lang[i];
+        }
+
+        // 1. Suffix: base_HI.mp3 or base_hi.mp3
+        snprintf(cand, sizeof(cand), "%s_%s.mp3", base, lang_upper);
+        snprintf(full_path, sizeof(full_path), "%s%s", folder, cand);
         if (fs_size(full_path) > 0) {
-            return prv_add_audio_name(buf, buf_size, preferred);
+            prv_add_audio_name(buf, buf_size, cand);
+            return true;
+        }
+        snprintf(cand, sizeof(cand), "%s_%s.mp3", base, lang_lower);
+        snprintf(full_path, sizeof(full_path), "%s%s", folder, cand);
+        if (fs_size(full_path) > 0) {
+            prv_add_audio_name(buf, buf_size, cand);
+            return true;
+        }
+
+        // 2. Middle: id_HI_X.mp3 or id_hi_X.mp3 (if starts with "id_")
+        if (strncmp(base, "id_", 3) == 0) {
+            snprintf(cand, sizeof(cand), "id_%s_%s.mp3", lang_upper, base + 3);
+            snprintf(full_path, sizeof(full_path), "%s%s", folder, cand);
+            if (fs_size(full_path) > 0) {
+                prv_add_audio_name(buf, buf_size, cand);
+                return true;
+            }
+            snprintf(cand, sizeof(cand), "id_%s_%s.mp3", lang_lower, base + 3);
+            snprintf(full_path, sizeof(full_path), "%s%s", folder, cand);
+            if (fs_size(full_path) > 0) {
+                prv_add_audio_name(buf, buf_size, cand);
+                return true;
+            }
+        }
+
+        // 3. Prefix: HI_fname or hi_fname
+        snprintf(cand, sizeof(cand), "%s_%s", lang_upper, fname);
+        snprintf(full_path, sizeof(full_path), "%s%s", folder, cand);
+        if (fs_size(full_path) > 0) {
+            prv_add_audio_name(buf, buf_size, cand);
+            return true;
+        }
+        snprintf(cand, sizeof(cand), "%s_%s", lang_lower, fname);
+        snprintf(full_path, sizeof(full_path), "%s%s", folder, cand);
+        if (fs_size(full_path) > 0) {
+            prv_add_audio_name(buf, buf_size, cand);
+            return true;
         }
     }
-    if (fallback) {
-        snprintf(full_path, sizeof(full_path), "%s%s", prefix, fallback);
+
+    // Direct match
+    snprintf(full_path, sizeof(full_path), "%s%s", folder, fname);
+    if (fs_size(full_path) > 0) {
+        prv_add_audio_name(buf, buf_size, fname);
+        return true;
+    }
+
+    // Fallback: check root D:/ if folder was D:/FEMALE/
+    if (strcmp(folder, "D:/FEMALE/") == 0) {
+        snprintf(full_path, sizeof(full_path), "D:/%s", fname);
         if (fs_size(full_path) > 0) {
-            return prv_add_audio_name(buf, buf_size, fallback);
+            prv_add_audio_name(buf, buf_size, fname);
+            return true;
         }
     }
-    // Default fallback to preferred if fs_size check is unavailable
-    if (preferred) {
-        return prv_add_audio_name(buf, buf_size, preferred);
+    return false;
+}
+
+// add by vipin: add audio file checking language variations, 2-digit padding, and currency aliases in D:/FEMALE/
+static int prv_add_lang_audio(char *buf, size_t buf_size, const char *filename, const char *lang) {
+    const char *folder = AUDIO_FOLDER_PATH; // strictly D:/FEMALE/ (no subdirectories created)
+
+    // 1. Try direct / lang variants for primary filename
+    if (prv_try_file_with_lang(buf, buf_size, folder, filename, lang)) {
+        return 0;
+    }
+
+    // 2. Zero-padded / unpadded alias: e.g. "id_1.mp3" <-> "id_01.mp3"
+    int single_num = -1;
+    if (sscanf(filename, "id_%d.mp3", &single_num) == 1 && single_num >= 0 && single_num <= 9) {
+        char cand_num[32];
+        snprintf(cand_num, sizeof(cand_num), "id_%02d.mp3", single_num);
+        if (prv_try_file_with_lang(buf, buf_size, folder, cand_num, lang)) {
+            return 0;
+        }
+        snprintf(cand_num, sizeof(cand_num), "id_%d.mp3", single_num);
+        if (prv_try_file_with_lang(buf, buf_size, folder, cand_num, lang)) {
+            return 0;
+        }
+    }
+
+    // 3. Currency / unit aliases (rupees <-> rupee, paisa <-> paise)
+    if (strcmp(filename, "id_rupees.mp3") == 0) {
+        if (prv_try_file_with_lang(buf, buf_size, folder, "id_rupee.mp3", lang)) return 0;
+    } else if (strcmp(filename, "id_rupee.mp3") == 0) {
+        if (prv_try_file_with_lang(buf, buf_size, folder, "id_rupees.mp3", lang)) return 0;
+    } else if (strcmp(filename, "id_paisa.mp3") == 0) {
+        if (prv_try_file_with_lang(buf, buf_size, folder, "id_paise.mp3", lang)) return 0;
+    } else if (strcmp(filename, "id_paise.mp3") == 0) {
+        if (prv_try_file_with_lang(buf, buf_size, folder, "id_paisa.mp3", lang)) return 0;
+    }
+
+    // 4. Optional prompts: if thank_you not present, omit gracefully instead of adding missing file
+    if (strncmp(filename, "id_thank_you", 12) == 0) {
+        FRAMEWORK_LOG("Optional audio %s not present, skipping", filename);
+        return 0;
+    }
+
+    // Default fallback
+    return prv_add_audio_name(buf, buf_size, filename);
+}
+
+// add by vipin: check if language is Hindi
+static bool prv_is_lang_hindi(const char *lang) {
+    if (!lang) return false;
+    if (lang[0] == 'H' || lang[0] == 'h') {
+        if (lang[1] == 'I' || lang[1] == 'i') {
+            return (lang[2] == '\0' || 
+                   ((lang[2] == 'N' || lang[2] == 'n') &&
+                    (lang[3] == 'D' || lang[3] == 'd') &&
+                    (lang[4] == 'I' || lang[4] == 'i') && lang[5] == '\0'));
+        }
+    }
+    return false;
+}
+
+// add by vipin: check if Indian Lakh audio exists in D:/FEMALE/
+static bool prv_has_lakh_audio(const char *lang) {
+    char full_path[128];
+    snprintf(full_path, sizeof(full_path), "%sid_lakh.mp3", AUDIO_FOLDER_PATH);
+    if (fs_size(full_path) > 0) return true;
+    snprintf(full_path, sizeof(full_path), "%sid_lakh_%s.mp3", AUDIO_FOLDER_PATH, lang);
+    if (fs_size(full_path) > 0) return true;
+    snprintf(full_path, sizeof(full_path), "%sid_lac.mp3", AUDIO_FOLDER_PATH);
+    if (fs_size(full_path) > 0) return true;
+    snprintf(full_path, sizeof(full_path), "%slakh.mp3", AUDIO_FOLDER_PATH);
+    return (fs_size(full_path) > 0);
+}
+
+// =============================================================================
+// HINDI (HI) PAYMENT AUDIO HANDLER
+// Sequence: [Rupees] रुपये [Paise] पैसे प्राप्त हुए
+// All numbers 1-99 are direct single files (id_01.mp3 to id_99.mp3)
+// =============================================================================
+
+static int prv_hindi_units_to_seq(int n, char *buf, size_t buf_size) {
+    if (n <= 0) return 0;
+    int hundreds = n / 100;
+    int rem = n % 100;
+    int ret = 0;
+
+    if (hundreds > 0) {
+        char tmp[32];
+        if (hundreds < 10) {
+            snprintf(tmp, sizeof(tmp), "id_%02d.mp3", hundreds);
+        } else {
+            snprintf(tmp, sizeof(tmp), "id_%d.mp3", hundreds);
+        }
+        ret = prv_add_lang_audio(buf, buf_size, tmp, "HI");
+        if (ret) return ret;
+
+        ret = prv_add_lang_audio(buf, buf_size, "id_hundred.mp3", "HI");
+        if (ret) return ret;
+    }
+
+    if (rem > 0) {
+        char direct_file[32];
+        if (rem < 10) {
+            snprintf(direct_file, sizeof(direct_file), "id_%02d.mp3", rem);
+        } else {
+            snprintf(direct_file, sizeof(direct_file), "id_%d.mp3", rem);
+        }
+        ret = prv_add_lang_audio(buf, buf_size, direct_file, "HI");
+        if (ret) return ret;
     }
     return 0;
 }
 
-// add by vipin: Generate 1~999 number sequence (e.g. 150 -> 1 hundred 50)
-static int prv_units_to_seq(int n, char *buf, size_t buf_size) {
+static int prv_hindi_number_to_seq(uint64_t n, char *buf, size_t buf_size) {
     int ret = 0;
+    if (n <= 0) return 0;
+
+    // Crores (1,00,00,000)
+    uint64_t crores = n / 10000000;
+    if (crores > 0) {
+        ret = prv_hindi_units_to_seq((int)crores, buf, buf_size);
+        if (ret) return ret;
+        ret = prv_add_lang_audio(buf, buf_size, "id_crore.mp3", "HI");
+        if (ret) return ret;
+        n %= 10000000;
+    }
+
+    // Lakhs (1,00,000)
+    uint64_t lakhs = n / 100000;
+    if (lakhs > 0) {
+        ret = prv_hindi_units_to_seq((int)lakhs, buf, buf_size);
+        if (ret) return ret;
+        ret = prv_add_lang_audio(buf, buf_size, "id_lakh.mp3", "HI");
+        if (ret) return ret;
+        n %= 100000;
+    }
+
+    // Thousands (1,000)
+    uint64_t thousands = n / 1000;
+    if (thousands > 0) {
+        ret = prv_hindi_units_to_seq((int)thousands, buf, buf_size);
+        if (ret) return ret;
+        ret = prv_add_lang_audio(buf, buf_size, "id_thousand.mp3", "HI");
+        if (ret) return ret;
+        n %= 1000;
+    }
+
+    // Remaining hundreds & units (1-999)
+    if (n > 0) {
+        ret = prv_hindi_units_to_seq((int)n, buf, buf_size);
+        if (ret) return ret;
+    }
+
+    return 0;
+}
+
+// add by vipin: dedicated Hindi payment audio generator
+static int prv_generate_hindi_payment_audio(uint64_t rupees, uint32_t paise, char *audio_list, size_t list_size)
+{
+    int ret = 0;
+
+    // 1. Rupees part (e.g. 24 -> "id_24.mp3" + "id_rupee.mp3")
+    if (rupees > 0) {
+        ret = prv_hindi_number_to_seq(rupees, audio_list, list_size);
+        if (ret) return ret;
+
+        ret = prv_add_lang_audio(audio_list, list_size, "id_rupee.mp3", "HI");
+        if (ret) return ret;
+    }
+
+    // 2. Paise part (e.g. 34 -> "id_34.mp3" + "id_paise.mp3")
+    if (paise > 0) {
+        ret = prv_hindi_number_to_seq((uint64_t)paise, audio_list, list_size);
+        if (ret) return ret;
+
+        ret = prv_add_lang_audio(audio_list, list_size, "id_paise.mp3", "HI");
+        if (ret) return ret;
+    }
+
+    // 3. Zero amount handling
+    if (rupees == 0 && paise == 0) {
+        ret = prv_add_lang_audio(audio_list, list_size, "id_0.mp3", "HI");
+        if (ret == 0) {
+            prv_add_lang_audio(audio_list, list_size, "id_rupee.mp3", "HI");
+        }
+    }
+
+    // 4. "id_received.mp3" ("प्राप्त हुए") at the END for Hindi
+    ret = prv_add_lang_audio(audio_list, list_size, "id_received.mp3", "HI");
+    if (ret) return ret;
+
+    // 5. Optional Thank You (skipped automatically if not present in folder)
+    ret = prv_add_lang_audio(audio_list, list_size, "id_thank_you.mp3", "HI");
+    if (ret) return ret;
+
+    return 0;
+}
+
+// =============================================================================
+// ENGLISH (EN) PAYMENT AUDIO HANDLER
+// Sequence: Received [Rupees] Rupees [Paise] Paise Thank you
+// Numbers 20-99 are split into tens + units (e.g. 24 -> 20 + 4)
+// =============================================================================
+
+static int prv_english_units_to_seq(int n, char *buf, size_t buf_size) {
     if (n <= 0) return 0;
     int hundreds = n / 100;
     int rem = n % 100;
-    if (hundreds) {
-        // add by vipin: For 100, play "id_1.mp3" + "id_hundred.mp3" (e.g. 1 hundred 50 instead of seratus/100)
+    int ret = 0;
+
+    if (hundreds > 0) {
         char tmp[32];
         snprintf(tmp, sizeof(tmp), "id_%d.mp3", hundreds);
-        ret = prv_add_audio_name(buf, buf_size, tmp);
+        ret = prv_add_lang_audio(buf, buf_size, tmp, "EN");
         if (ret) return ret;
-        ret = prv_add_audio_name(buf, buf_size, "id_hundred.mp3");
+
+        ret = prv_add_lang_audio(buf, buf_size, "id_hundred.mp3", "EN");
         if (ret) return ret;
     }
-    if (rem) {
-        if (rem < 10) {
+
+    if (rem > 0) {
+        if (rem < 20) {
             char tmp[32];
             snprintf(tmp, sizeof(tmp), "id_%d.mp3", rem);
-            ret = prv_add_audio_name(buf, buf_size, tmp);
-            if (ret) return ret;
-        } else if (rem < 20) {
-            char tmp[32];
-            snprintf(tmp, sizeof(tmp), "id_%d.mp3", rem);
-            ret = prv_add_audio_name(buf, buf_size, tmp);
+            ret = prv_add_lang_audio(buf, buf_size, tmp, "EN");
             if (ret) return ret;
         } else {
-            int tens = (rem / 10) * 10;
-            int unit = rem % 10;
-            char tmp[32];
-            snprintf(tmp, sizeof(tmp), "id_%d.mp3", tens);
-            ret = prv_add_audio_name(buf, buf_size, tmp);
-            if (ret) return ret;
-            if (unit) {
-                snprintf(tmp, sizeof(tmp), "id_%d.mp3", unit);
-                ret = prv_add_audio_name(buf, buf_size, tmp);
+            // Check if direct single-word file exists (e.g. id_24_EN.mp3 or id_24.mp3)
+            char direct_file[32];
+            snprintf(direct_file, sizeof(direct_file), "id_%d.mp3", rem);
+            if (prv_try_file_with_lang(buf, buf_size, AUDIO_FOLDER_PATH, direct_file, "EN")) {
+                // Direct file added
+            } else {
+                int tens = (rem / 10) * 10;
+                int unit = rem % 10;
+                char tmp[32];
+                snprintf(tmp, sizeof(tmp), "id_%d.mp3", tens);
+                ret = prv_add_lang_audio(buf, buf_size, tmp, "EN");
                 if (ret) return ret;
+                if (unit > 0) {
+                    snprintf(tmp, sizeof(tmp), "id_%d.mp3", unit);
+                    ret = prv_add_lang_audio(buf, buf_size, tmp, "EN");
+                    if (ret) return ret;
+                }
             }
         }
     }
     return 0;
 }
 
-// add by vipin: Sequence generator for full number
-static int prv_number_to_sequence(uint64_t n, char *buf, size_t buf_size) {
+static int prv_english_number_to_seq(uint64_t n, char *buf, size_t buf_size) {
     int ret = 0;
-    if (n <= 0) {
-        return 0;
-    }
-    // Millions
-    uint64_t millions = n / 1000000;
-    if (millions) {
-        if (millions == 1) {
-            ret = prv_add_audio_name(buf, buf_size, "id_1.mp3");
+    if (n <= 0) return 0;
+
+    if (prv_has_lakh_audio("EN")) {
+        // Indian Numbering for English (Crores, Lakhs, Thousands, Hundreds)
+        uint64_t crores = n / 10000000;
+        if (crores > 0) {
+            ret = prv_english_units_to_seq((int)crores, buf, buf_size);
             if (ret) return ret;
-            ret = prv_add_currency_audio(buf, buf_size, "id_million.mp3", "million.mp3");
+            ret = prv_add_lang_audio(buf, buf_size, "id_crore.mp3", "EN");
             if (ret) return ret;
-        } else {
-            ret = prv_units_to_seq((int)millions, buf, buf_size);
+            n %= 10000000;
+        }
+
+        uint64_t lakhs = n / 100000;
+        if (lakhs > 0) {
+            ret = prv_english_units_to_seq((int)lakhs, buf, buf_size);
             if (ret) return ret;
-            ret = prv_add_currency_audio(buf, buf_size, "id_million.mp3", "million.mp3");
+            ret = prv_add_lang_audio(buf, buf_size, "id_lakh.mp3", "EN");
             if (ret) return ret;
+            n %= 100000;
+        }
+    } else {
+        // Western Numbering for English (Millions, Thousands, Hundreds)
+        uint64_t millions = n / 1000000;
+        if (millions > 0) {
+            ret = prv_english_units_to_seq((int)millions, buf, buf_size);
+            if (ret) return ret;
+            ret = prv_add_lang_audio(buf, buf_size, "id_million.mp3", "EN");
+            if (ret) return ret;
+            n %= 1000000;
         }
     }
-    n = n % 1000000;
-    // Thousands
+
     uint64_t thousands = n / 1000;
-    if (thousands) {
-        // add by vipin: For 1000, play "id_1.mp3" + "id_thousand.mp3" instead of seribu
-        if (thousands == 1) {
-            ret = prv_add_audio_name(buf, buf_size, "id_1.mp3");
-            if (ret) return ret;
-            ret = prv_add_audio_name(buf, buf_size, "id_thousand.mp3");
-            if (ret) return ret;
-        } else {
-            ret = prv_units_to_seq((int)thousands, buf, buf_size);
-            if (ret) return ret;
-            ret = prv_add_audio_name(buf, buf_size, "id_thousand.mp3");
-            if (ret) return ret;
-        }
+    if (thousands > 0) {
+        ret = prv_english_units_to_seq((int)thousands, buf, buf_size);
+        if (ret) return ret;
+        ret = prv_add_lang_audio(buf, buf_size, "id_thousand.mp3", "EN");
+        if (ret) return ret;
+        n %= 1000;
     }
-    n = n % 1000;
-    // Hundred / tens / units
+
     if (n > 0) {
-        ret = prv_units_to_seq((int)n, buf, buf_size);
+        ret = prv_english_units_to_seq((int)n, buf, buf_size);
         if (ret) return ret;
     }
+
     return 0;
 }
 
-// add by vipin: generate audio list with rupees/rupee and paise handling
-static int prv_generate_amount_audio_list(const payment_broadcast_params_t *params, char *audio_list, size_t list_size)
+// add by vipin: dedicated English payment audio generator
+static int prv_generate_english_payment_audio(uint64_t rupees, uint32_t paise, char *audio_list, size_t list_size)
 {
     int ret = 0;
-    audio_list[0] = '\0';
-    // 1. id_received.mp3
-    ret = prv_add_audio_name(audio_list, list_size, "id_received.mp3");
+
+    // 1. "id_received.mp3" at START for English
+    ret = prv_add_lang_audio(audio_list, list_size, "id_received.mp3", "EN");
     if (ret) return ret;
 
-    uint64_t rupees = params->rupees; // add by vipin
-    uint32_t paise = params->paise;   // add by vipin
+    // 2. Rupees portion
+    if (rupees > 0) {
+        ret = prv_english_number_to_seq(rupees, audio_list, list_size);
+        if (ret) return ret;
+
+        if (rupees == 1) {
+            ret = prv_add_lang_audio(audio_list, list_size, "id_rupee.mp3", "EN");
+            if (ret) return ret;
+        } else {
+            ret = prv_add_lang_audio(audio_list, list_size, "id_rupees.mp3", "EN");
+            if (ret) return ret;
+        }
+    }
+
+    // 3. Paise portion
+    if (paise > 0) {
+        ret = prv_english_units_to_seq((int)paise, audio_list, list_size);
+        if (ret) return ret;
+
+        if (paise == 1) {
+            ret = prv_add_lang_audio(audio_list, list_size, "id_paisa.mp3", "EN");
+            if (ret) return ret;
+        } else {
+            ret = prv_add_lang_audio(audio_list, list_size, "id_paise.mp3", "EN");
+            if (ret) return ret;
+        }
+    }
+
+    // 4. Zero amount handling
+    if (rupees == 0 && paise == 0) {
+        ret = prv_add_lang_audio(audio_list, list_size, "id_0.mp3", "EN");
+        if (ret == 0) {
+            prv_add_lang_audio(audio_list, list_size, "id_rupees.mp3", "EN");
+        }
+    }
+
+    // 5. "id_thank_you.mp3" at END for English
+    ret = prv_add_lang_audio(audio_list, list_size, "id_thank_you.mp3", "EN");
+    if (ret) return ret;
+
+    return 0;
+}
+
+// add by vipin: main dispatcher routing to dedicated English or Hindi handler
+static int prv_generate_amount_audio_list(const payment_broadcast_params_t *params, char *audio_list, size_t list_size)
+{
+    audio_list[0] = '\0';
+
+    const char *lang = (params->language[0] != '\0') ? params->language : "EN";
+    uint64_t rupees = params->rupees;
+    uint32_t paise = params->paise;
 
     // Legacy fallback: if rupees and paise both 0 but amount > 0
     if (rupees == 0 && paise == 0 && params->amount > 0) {
         rupees = params->amount;
     }
 
-    // 2. Rupees handling (add by vipin)
-    if (rupees > 0) {
-        ret = prv_number_to_sequence(rupees, audio_list, list_size);
-        if (ret) return ret;
-
-        if (rupees == 1) {
-            // add by vipin: Singular - 1 Rupee
-            ret = prv_add_currency_audio(audio_list, list_size, "id_rupee.mp3", "rupee.mp3");
-            if (ret) return ret;
-        } else {
-            // add by vipin: Plural - Rupees
-            ret = prv_add_currency_audio(audio_list, list_size, "id_rupees.mp3", "rupees.mp3");
-            if (ret) return ret;
-        }
+    // Call respective dedicated handler
+    if (prv_is_lang_hindi(lang)) {
+        return prv_generate_hindi_payment_audio(rupees, paise, audio_list, list_size);
+    } else {
+        return prv_generate_english_payment_audio(rupees, paise, audio_list, list_size);
     }
-
-    // 3. Paise handling (add by vipin: e.g. 50 paise)
-    if (paise > 0) {
-        ret = prv_units_to_seq((int)paise, audio_list, list_size);
-        if (ret) return ret;
-
-        if (paise == 1) {
-            // add by vipin: Singular - 1 Paisa
-            ret = prv_add_currency_audio(audio_list, list_size, "id_paisa.mp3", "paisa.mp3");
-            if (ret) return ret;
-        } else {
-            // add by vipin: Plural - Paise
-            ret = prv_add_currency_audio(audio_list, list_size, "id_paise.mp3", "paise.mp3");
-            if (ret) return ret;
-        }
-    }
-
-    // If both rupees and paise are 0 (amount = 0)
-    if (rupees == 0 && paise == 0) {
-        char path[128];
-        const char *prefix = audio_resource_get_language_prefix();
-        if (!prefix) prefix = "D:/FEMALE/";
-        snprintf(path, sizeof(path), "%sid_0.mp3", prefix);
-        if (fs_size(path) > 0) {
-            ret = prv_add_audio_name(audio_list, list_size, "id_0.mp3");
-            if (ret == 0) {
-                prv_add_currency_audio(audio_list, list_size, "id_rupees.mp3", "rupees.mp3");
-            }
-        }
-    }
-
-    // 4. id_thank_you.mp3
-    ret = prv_add_audio_name(audio_list, list_size, "id_thank_you.mp3");
-    if (ret) return ret;
-    return 0;
 }
 
 static payment_broadcast_params_t s_last_payment_params = {0};
@@ -225,7 +498,7 @@ static uint32_t s_last_txn_count = 0;  // add by vipin: transaction count of las
 
 static char s_pending_txn_id[64] = {0};
 static char s_pending_amount_str[16] = {0};
-static char s_pending_language[8] = {0};
+static char s_pending_language[16] = {0};
 
 static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audio_playback_status_t status, int result)
 {
@@ -287,8 +560,14 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
         FRAMEWORK_LOG("Invalid payment params");
         return -1;
     }
-    FRAMEWORK_LOG("Payment broadcast: rupees=%llu, paise=%lu, total=%.2f, is_replay=%d", 
-                  (unsigned long long)params->rupees, (unsigned long)params->paise, params->total_amount, is_replay); // add by vipin
+
+    audio_resource_set_language_prefix(AUDIO_FOLDER_PATH);
+
+    const char *lang_str = (params->language[0] != '\0') ? params->language : "EN";
+
+    FRAMEWORK_LOG("Payment broadcast: rupees=%llu, paise=%lu, total=%.2f, lang=%s, folder=%s, is_replay=%d", 
+                  (unsigned long long)params->rupees, (unsigned long)params->paise, params->total_amount,
+                  lang_str, AUDIO_FOLDER_PATH, is_replay);
 
     if (!is_replay) {
         s_total_txn_count++; // add by vipin: increment transaction count for new payment

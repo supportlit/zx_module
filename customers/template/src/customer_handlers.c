@@ -1168,6 +1168,34 @@ int customer_msg_handler(framework_msg_t *msg)
                         OSI_LOGE(TAG, "FW OTA file MD5 calc failed");
                     }
                 }
+                // add by vipin: check if downloaded FW OTA file is a ZIP archive
+                bool is_zip = false;
+                if (path && path[0])
+                {
+                    int fd = fs_open(path, "rb");
+                    if (fd >= 0)
+                    {
+                        uint32_t magic = 0;
+                        if (fs_read(&magic, 1, 4, fd) == 4 && magic == 0x04034B50) // 'PK\x03\x04'
+                        {
+                            is_zip = true;
+                        }
+                        fs_close(fd);
+                    }
+                }
+
+                if (is_zip)
+                {
+                    OSI_LOGI(TAG, "FW OTA downloaded file is ZIP archive, unzipping to D:/ ...");
+                    int unzip_ret = framework_unzip_start(path, "D:/", FRAMEWORK_UNZIP_TYPE_OTA);
+                    if (unzip_ret != 0)
+                    {
+                        OSI_LOGE(TAG, "Failed to start OTA unzip (err=%d)", unzip_ret);
+                        audio_resource_play_combo_async_mid_priority("", "upgrade-failed.mp3", NULL, 1);
+                    }
+                    break;
+                }
+
                 bool fota_ret = fupdateAppSetReady(path ? path : "");
                 if (fota_ret)
                 {
@@ -1265,10 +1293,65 @@ int customer_msg_handler(framework_msg_t *msg)
     }
     case MSG_UNZIP_START:
     case MSG_UNZIP_PROGRESS:
-    case MSG_UNZIP_SUCCESS:
-    case MSG_UNZIP_FAIL:
         template_mqtt_handle_unzip_msg(msg);
         return 0;
+    case MSG_UNZIP_SUCCESS:
+    {
+        framework_unzip_type_t unzip_type = (framework_unzip_type_t)msg->param1;
+        if (unzip_type == FRAMEWORK_UNZIP_TYPE_OTA)
+        {
+            OSI_LOGI(TAG, "OTA ZIP extraction completed successfully");
+            // Look for extracted app binary in D:/
+            const char *bin_path = NULL;
+            if (fs_size("D:/customer_app.bin") > 0) {
+                bin_path = "D:/customer_app.bin";
+            } else if (fs_size("D:/FOTA_APP.bin") > 0) {
+                bin_path = "D:/FOTA_APP.bin";
+            } else if (fs_size("D:/ota_update.bin") > 0) {
+                bin_path = "D:/ota_update.bin";
+            } else if (fs_size("D:/app.bin") > 0) {
+                bin_path = "D:/app.bin";
+            }
+
+            if (bin_path != NULL)
+            {
+                OSI_LOGI(TAG, "Setting FOTA ready for: %s", bin_path);
+                bool fota_ret = fupdateAppSetReady(bin_path);
+                if (fota_ret)
+                {
+                    audio_resource_play_combo_async_mid_priority("", "upgrade-success.mp3", NULL, 1);
+                    OSI_LOGI(TAG, "Firmware update set ready successfully, rebooting in 1s...");
+                    osiThreadSleep(1000);
+                    osiSysReset();
+                }
+                else
+                {
+                    OSI_LOGE(TAG, "Failed to set firmware update ready for %s", bin_path);
+                    audio_resource_play_combo_async_mid_priority("", "upgrade-failed.mp3", NULL, 1);
+                }
+            }
+            else
+            {
+                OSI_LOGE(TAG, "No app binary found in D:/ after unzipping OTA package");
+                audio_resource_play_combo_async_mid_priority("", "upgrade-failed.mp3", NULL, 1);
+            }
+            return 0;
+        }
+        template_mqtt_handle_unzip_msg(msg);
+        return 0;
+    }
+    case MSG_UNZIP_FAIL:
+    {
+        framework_unzip_type_t unzip_type = (framework_unzip_type_t)msg->param1;
+        if (unzip_type == FRAMEWORK_UNZIP_TYPE_OTA)
+        {
+            OSI_LOGE(TAG, "OTA ZIP extraction failed");
+            audio_resource_play_combo_async_mid_priority("", "upgrade-failed.mp3", NULL, 1);
+            return 0;
+        }
+        template_mqtt_handle_unzip_msg(msg);
+        return 0;
+    }
     default:
         break;
     }
