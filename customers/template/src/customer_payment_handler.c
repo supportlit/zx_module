@@ -4,6 +4,7 @@
  */
 
 #include "customer_payment_handler.h"
+#include "customer_mqtt_handler.h"
 #include "framework_log.h"
 #include "framework_audio.h"
 #include "audio_resource_map.h"
@@ -32,7 +33,7 @@ static int prv_add_audio_name(char *buf, size_t buf_size, const char *filename) 
 
 #define AUDIO_FOLDER_PATH "D:/FEMALE/"
 
-// add by vipin: audio folder is strictly D:/FEMALE/ with no subdirectories
+static bool prv_is_lang_hindi(const char *lang);
 
 // add by vipin: helper to check file existence with language variations in D:/FEMALE/
 static bool prv_try_file_with_lang(char *buf, size_t buf_size, const char *folder, const char *fname, const char *lang) {
@@ -103,6 +104,17 @@ static bool prv_try_file_with_lang(char *buf, size_t buf_size, const char *folde
         return true;
     }
 
+    // Check inside subfolder hindi_id/ if language is Hindi
+    if (prv_is_lang_hindi(lang)) {
+        snprintf(full_path, sizeof(full_path), "%shindi_id/%s", folder, fname);
+        if (fs_size(full_path) > 0) {
+            char sub_fname[64];
+            snprintf(sub_fname, sizeof(sub_fname), "hindi_id/%s", fname);
+            prv_add_audio_name(buf, buf_size, sub_fname);
+            return true;
+        }
+    }
+
     // Fallback: check root D:/ if folder was D:/FEMALE/
     if (strcmp(folder, "D:/FEMALE/") == 0) {
         snprintf(full_path, sizeof(full_path), "D:/%s", fname);
@@ -161,6 +173,7 @@ static int prv_add_lang_audio(char *buf, size_t buf_size, const char *filename, 
 // add by vipin: check if language is Hindi
 static bool prv_is_lang_hindi(const char *lang) {
     if (!lang) return false;
+    if (strcmp(lang, "1") == 0) return true;
     if (lang[0] == 'H' || lang[0] == 'h') {
         if (lang[1] == 'I' || lang[1] == 'i') {
             return (lang[2] == '\0' || 
@@ -300,10 +313,6 @@ static int prv_generate_hindi_payment_audio(uint64_t rupees, uint32_t paise, cha
 
     // 4. "id_received.mp3" ("प्राप्त हुए") at the END for Hindi
     ret = prv_add_lang_audio(audio_list, list_size, "id_received.mp3", "HI");
-    if (ret) return ret;
-
-    // 5. Optional Thank You (skipped automatically if not present in folder)
-    ret = prv_add_lang_audio(audio_list, list_size, "id_thank_you.mp3", "HI");
     if (ret) return ret;
 
     return 0;
@@ -470,7 +479,7 @@ static int prv_generate_amount_audio_list(const payment_broadcast_params_t *para
 {
     audio_list[0] = '\0';
 
-    const char *lang = (params->language[0] != '\0') ? params->language : "EN";
+    const char *lang = (params->language[0] != '\0') ? params->language : customer_get_default_language();
     uint64_t rupees = params->rupees;
     uint32_t paise = params->paise;
 
@@ -563,7 +572,7 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
 
     audio_resource_set_language_prefix(AUDIO_FOLDER_PATH);
 
-    const char *lang_str = (params->language[0] != '\0') ? params->language : "EN";
+    const char *lang_str = (params->language[0] != '\0') ? params->language : customer_get_default_language();
 
     FRAMEWORK_LOG("Payment broadcast: rupees=%llu, paise=%lu, total=%.2f, lang=%s, folder=%s, is_replay=%d", 
                   (unsigned long long)params->rupees, (unsigned long)params->paise, params->total_amount,
@@ -586,7 +595,7 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
             strncpy(s_pending_language, params->language, sizeof(s_pending_language) - 1);
             s_pending_language[sizeof(s_pending_language) - 1] = '\0';
         } else {
-            strncpy(s_pending_language, "EN", sizeof(s_pending_language) - 1);
+            strncpy(s_pending_language, customer_get_default_language(), sizeof(s_pending_language) - 1);
             s_pending_language[sizeof(s_pending_language) - 1] = '\0';
         }
     }

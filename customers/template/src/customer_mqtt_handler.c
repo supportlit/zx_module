@@ -1,6 +1,8 @@
 #include "customer_mqtt_handler.h"
 #include "cJSON.h"
 #include "customer_config.h"
+#include "customer_language_ack.h"
+#include "customer_change_language_ack.h"
 #include "customer_payment_handler.h"
 #include "customer_status_report.h"
 #include "framework_audio.h"
@@ -25,6 +27,8 @@
 #define TEMPLATE_SOUND_ZIP_PATH "D:/template_sound_update.zip"
 #define TEMPLATE_SOUND_UNZIP_DEST "D:/"
 #define TEMPLATE_SOUND_MD5_MAX 64
+#define TEMPLATE_LANGUAGE_FILE_PATH "D:/language.txt"
+#define TEMPLATE_LANGUAGE_FILE_FALLBACK "language.txt"
 
 #define TEMPLATE_CERTS_DIR_PATH "D:/certs/"
 #define TEMPLATE_CA_CERT_PATH TEMPLATE_CERTS_DIR_PATH "AmazonRootCA1.pem"
@@ -56,6 +60,11 @@ typedef struct {
   template_sound_state_t state;
   char checksum[TEMPLATE_SOUND_MD5_MAX];
   char unzip_dest[64];
+  char pending_lang[16];
+  bool is_sound_update_topic;
+  double request_id;
+  char uuid[48];
+  char device_id[48];
 } template_sound_update_ctx_t;
 
 static template_sound_update_ctx_t g_sound_update_ctx = {0};
@@ -66,7 +75,9 @@ static void template_sound_update_fail(const char *reason);
 static void template_sound_update_success(void);
 static int template_calc_file_md5(const char *path, char *md5_out33);
 static int template_compare_checksum(const char *expected, const char *actual);
-static int template_start_sound_update(const char *url, const char *checksum, const char *dst);
+static int template_start_sound_update(const char *url, const char *checksum, const char *dst, const char *lang,
+                                      bool is_sound_update_topic,
+                                      double request_id, const char *uuid, const char *device_id);
 static void template_handle_http_download_msg(framework_msg_t *msg);
 static void template_handle_unzip_msg(framework_msg_t *msg);
 
@@ -85,6 +96,111 @@ static mqtt_cert_config_t s_template_cert = {0};
 static int g_mqtt_initialized = 0;
 static int reconnect_count_idx = 0;
 static char s_default_language[16] = "EN";
+static bool s_lang_initialized = false;
+
+static char *prv_str_trim(char *str) {
+  if (!str) return "";
+  while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n') str++;
+  if (*str == 0) return str;
+  char *end = str + strlen(str) - 1;
+  while (end > str && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+    *end = '\0';
+    end--;
+  }
+  return str;
+}
+
+static void template_save_language(const char *lang) {
+  if (!lang || lang[0] == '\0') {
+    return;
+  }
+  int fd = fs_open(TEMPLATE_LANGUAGE_FILE_PATH, "wb+");
+  if (fd > 0) {
+    fs_write((void *)lang, 1, strlen(lang), fd);
+    fs_close(fd);
+    OSI_LOGI(TAG, "[LANG-SAVE] Saved language '%s' to %s", lang, TEMPLATE_LANGUAGE_FILE_PATH);
+  } else {
+    OSI_LOGE(TAG, "[LANG-SAVE] Failed to open %s for write", TEMPLATE_LANGUAGE_FILE_PATH);
+  }
+
+  // Also write to fallback path language.txt for compatibility
+  fd = fs_open(TEMPLATE_LANGUAGE_FILE_FALLBACK, "wb+");
+  if (fd > 0) {
+    fs_write((void *)lang, 1, strlen(lang), fd);
+    fs_close(fd);
+  }
+}
+
+void customer_language_init(void) {
+  if (s_lang_initialized) {
+    return;
+  }
+  s_lang_initialized = true;
+
+  char lang_buf[32] = {0};
+  const char *path = NULL;
+  int flen = fs_size(TEMPLATE_LANGUAGE_FILE_PATH);
+  if (flen > 0) {
+    path = TEMPLATE_LANGUAGE_FILE_PATH;
+  } else {
+    flen = fs_size(TEMPLATE_LANGUAGE_FILE_FALLBACK);
+    if (flen > 0) {
+      path = TEMPLATE_LANGUAGE_FILE_FALLBACK;
+    }
+  }
+
+  if (path != NULL) {
+    int fd = fs_open(path, "rb");
+    if (fd > 0) {
+      int rlen = fs_read(lang_buf, 1, sizeof(lang_buf) - 1, fd);
+      fs_close(fd);
+      if (rlen > 0) {
+        lang_buf[rlen] = '\0';
+        char *trimmed = prv_str_trim(lang_buf);
+        if (trimmed && trimmed[0] != '\0') {
+          if (trimmed[0] == '{') {
+            cJSON *root = cJSON_Parse(trimmed);
+            if (root) {
+              const cJSON *j_lang = cJSON_GetObjectItem(root, "language");
+              if (!j_lang) j_lang = cJSON_GetObjectItem(root, "active_language");
+              if (!j_lang) j_lang = cJSON_GetObjectItem(root, "lang");
+              if (!j_lang) j_lang = cJSON_GetObjectItem(root, "lang_support");
+              if (j_lang && cJSON_IsString(j_lang) && j_lang->valuestring && j_lang->valuestring[0] != '\0') {
+                strncpy(s_default_language, j_lang->valuestring, sizeof(s_default_language) - 1);
+                s_default_language[sizeof(s_default_language) - 1] = '\0';
+              }
+              cJSON_Delete(root);
+            }
+          } else {
+            strncpy(s_default_language, trimmed, sizeof(s_default_language) - 1);
+            s_default_language[sizeof(s_default_language) - 1] = '\0';
+          }
+          OSI_LOGI(TAG, "[LANG-INIT] language.txt present (%s): loaded s_default_language='%s'", path, s_default_language);
+          return;
+        }
+      }
+    }
+  }
+
+  strncpy(s_default_language, "EN", sizeof(s_default_language) - 1);
+  s_default_language[sizeof(s_default_language) - 1] = '\0';
+  OSI_LOGI(TAG, "[LANG-INIT] language.txt not present, default to s_default_language='%s'", s_default_language);
+}
+
+const char *customer_get_default_language(void) {
+  if (!s_lang_initialized) {
+    customer_language_init();
+  }
+  return s_default_language;
+}
+
+void customer_set_default_language(const char *lang) {
+  if (lang && lang[0] != '\0') {
+    strncpy(s_default_language, lang, sizeof(s_default_language) - 1);
+    s_default_language[sizeof(s_default_language) - 1] = '\0';
+    template_save_language(s_default_language);
+  }
+}
 
 // Topics to subscribe after connection
 static const char *g_template_topics[] = {
@@ -108,6 +224,11 @@ static void template_sound_reset_ctx(void) {
   g_sound_update_ctx.state = TEMPLATE_SOUND_STATE_IDLE;
   g_sound_update_ctx.checksum[0] = '\0';
   g_sound_update_ctx.unzip_dest[0] = '\0';
+  g_sound_update_ctx.pending_lang[0] = '\0';
+  g_sound_update_ctx.is_sound_update_topic = false;
+  g_sound_update_ctx.request_id = 0;
+  g_sound_update_ctx.uuid[0] = '\0';
+  g_sound_update_ctx.device_id[0] = '\0';
 }
 
 static void template_sound_cleanup_files(void)
@@ -176,35 +297,92 @@ static int template_compare_checksum(const char *expected, const char *actual) {
 
 static void template_sound_update_fail(const char *reason) {
   OSI_LOGE(TAG, "Sound update failed: %s", reason ? reason : "unknown");
+
+  // Send DownloadLanguageacknowledgement HTTP request for failure ONLY for /sound-update
+  if (g_sound_update_ctx.is_sound_update_topic) {
+    customer_send_language_ack(g_sound_update_ctx.request_id,
+                               g_sound_update_ctx.uuid,
+                               (g_sound_update_ctx.device_id[0] != '\0') ? g_sound_update_ctx.device_id : sn,
+                               "Failed",
+                               reason ? reason : "unknown");
+  }
+
   template_sound_cleanup_files();
   template_sound_reset_ctx();
 }
 
 static void template_sound_update_success(void) {
   OSI_LOGI(TAG, "Sound update completed successfully");
-  audio_resource_play_combo_async_mid_priority("", "upgrade-success.mp3", NULL, 1);
+
+  // Send DownloadLanguageacknowledgement HTTP request for success ONLY for /sound-update
+  if (g_sound_update_ctx.is_sound_update_topic) {
+    customer_send_language_ack(g_sound_update_ctx.request_id,
+                               g_sound_update_ctx.uuid,
+                               (g_sound_update_ctx.device_id[0] != '\0') ? g_sound_update_ctx.device_id : sn,
+                               "Success",
+                               "");
+  }
+
+  // Update default language only after audio is unzipped successfully
+  if (g_sound_update_ctx.pending_lang[0] != '\0') {
+    strncpy(s_default_language, g_sound_update_ctx.pending_lang, sizeof(s_default_language) - 1);
+    s_default_language[sizeof(s_default_language) - 1] = '\0';
+    template_save_language(s_default_language);
+    audio_resource_set_language_prefix("D:/FEMALE/");
+    OSI_LOGI(TAG, "[SOUND-UPDATE] Unzip successful! Updated s_default_language to: %s", s_default_language);
+  }
+
+  if (fs_size("D:/FEMALE/upgrade-success.mp3") > 0 || fs_size("D:/upgrade-success.mp3") > 0) {
+    audio_resource_play_combo_async_mid_priority("", "upgrade-success.mp3", NULL, 1);
+  } else {
+    OSI_LOGI(TAG, "upgrade-success.mp3 not found, skipping success prompt");
+  }
   template_sound_cleanup_files();
   template_sound_reset_ctx();
 }
 
-static int template_start_sound_update(const char *url, const char *checksum, const char *dst) {
+static int template_start_sound_update(const char *url, const char *checksum, const char *dst, const char *lang,
+                                      bool is_sound_update_topic,
+                                      double request_id, const char *uuid, const char *device_id) {
   if (!url || url[0] == '\0') {
     OSI_LOGE(TAG, "[SOUND-UPDATE] url missing");
+    if (is_sound_update_topic) {
+      customer_send_language_ack(request_id, uuid, (device_id && device_id[0]) ? device_id : sn,
+                                 "Failed", "url missing");
+    }
     return -1;
   }
 
   if (g_sound_update_ctx.state != TEMPLATE_SOUND_STATE_IDLE) {
     OSI_LOGW(TAG, "[SOUND-UPDATE] request ignored, update already running");
+    if (is_sound_update_topic) {
+      customer_send_language_ack(request_id, uuid, (device_id && device_id[0]) ? device_id : sn,
+                                 "Failed", "update already running");
+    }
     return -2;
   }
 
   template_sound_cleanup_files();
   template_sound_reset_ctx();
+
+  g_sound_update_ctx.is_sound_update_topic = is_sound_update_topic;
+  if (request_id > 0) {
+    g_sound_update_ctx.request_id = request_id;
+  }
+  if (uuid && uuid[0] != '\0') {
+    strncpy(g_sound_update_ctx.uuid, uuid, sizeof(g_sound_update_ctx.uuid) - 1);
+  }
+  if (device_id && device_id[0] != '\0') {
+    strncpy(g_sound_update_ctx.device_id, device_id, sizeof(g_sound_update_ctx.device_id) - 1);
+  } else if (sn[0] != '\0') {
+    strncpy(g_sound_update_ctx.device_id, sn, sizeof(g_sound_update_ctx.device_id) - 1);
+  }
+
   if (checksum && checksum[0] != '\0') {
     strncpy(g_sound_update_ctx.checksum, checksum,
             sizeof(g_sound_update_ctx.checksum) - 1);
   }
-  if (dst && dst[0] != '\0') {
+  if (dst && dst[0] != '\0' && !strstr(dst, ".zip") && !strstr(dst, ".ZIP")) {
     strncpy(g_sound_update_ctx.unzip_dest, dst,
             sizeof(g_sound_update_ctx.unzip_dest) - 1);
   } else {
@@ -212,17 +390,33 @@ static int template_start_sound_update(const char *url, const char *checksum, co
     strncpy(g_sound_update_ctx.unzip_dest, "D:/FEMALE/",
             sizeof(g_sound_update_ctx.unzip_dest) - 1);
   }
+  size_t dlen = strlen(g_sound_update_ctx.unzip_dest);
+  if (dlen > 0 && g_sound_update_ctx.unzip_dest[dlen - 1] != '/' && g_sound_update_ctx.unzip_dest[dlen - 1] != '\\') {
+    if (dlen < sizeof(g_sound_update_ctx.unzip_dest) - 1) {
+      g_sound_update_ctx.unzip_dest[dlen] = '/';
+      g_sound_update_ctx.unzip_dest[dlen + 1] = '\0';
+    }
+  }
+
+  if (lang && lang[0] != '\0') {
+    strncpy(g_sound_update_ctx.pending_lang, lang,
+            sizeof(g_sound_update_ctx.pending_lang) - 1);
+    g_sound_update_ctx.pending_lang[sizeof(g_sound_update_ctx.pending_lang) - 1] = '\0';
+    OSI_LOGI(TAG, "[SOUND-UPDATE] Pending language: %s (will apply after successful unzip)", g_sound_update_ctx.pending_lang);
+  }
   g_sound_update_ctx.state = TEMPLATE_SOUND_STATE_DOWNLOADING;
 
   int ret = framework_http_download_file(url, TEMPLATE_SOUND_ZIP_PATH,
                                          HTTP_DOWNLOAD_TYPE_RES_OTA);
   if (ret != 0) {
     OSI_LOGE(TAG, "[SOUND-UPDATE] failed to queue download (%d)", ret);
-    template_sound_reset_ctx();
+    template_sound_update_fail("failed to queue download");
     return ret;
   }
 
-  OSI_LOGI(TAG, "[SOUND-UPDATE] download started url=%s dst=%s", url, g_sound_update_ctx.unzip_dest);
+  OSI_LOGI(TAG, "[SOUND-UPDATE] download started url=%s dst=%s lang=%s req_id=%.0f uuid=%s dev_id=%s",
+           url, g_sound_update_ctx.unzip_dest, g_sound_update_ctx.pending_lang,
+           g_sound_update_ctx.request_id, g_sound_update_ctx.uuid, g_sound_update_ctx.device_id);
   return 0;
 }
 
@@ -253,6 +447,9 @@ static void template_handle_http_download_msg(framework_msg_t *msg) {
       zip_path = TEMPLATE_SOUND_ZIP_PATH;
     }
 
+    uint32_t fsize = fs_size(zip_path);
+    OSI_LOGI(TAG, "[SOUND-UPDATE] Download complete: %s (size: %u bytes)", zip_path, fsize);
+
     if (g_sound_update_ctx.checksum[0] != '\0') {
       char md5_actual[33] = {0};
       if (template_calc_file_md5(zip_path, md5_actual) != 0 ||
@@ -278,6 +475,7 @@ static void template_handle_http_download_msg(framework_msg_t *msg) {
     break;
   }
   case MSG_HTTP_DOWNLOAD_FAIL:
+    OSI_LOGE(TAG, "[SOUND-UPDATE] Download failed (progress=%d%%, type=%d)", msg->param2, msg->param1);
     template_sound_update_fail("download failed");
     break;
   default:
@@ -315,6 +513,8 @@ static void template_handle_unzip_msg(framework_msg_t *msg) {
   }
 }
 
+static char s_pending_audio_download_lang[16] = {0};
+
 static void template_audio_download_callback(uint32_t msg_id, const char *save_path, void *user_data) {
   if (msg_id == MSG_HTTP_DOWNLOAD_START) {
     OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download started: %s", save_path ? save_path : "");
@@ -322,6 +522,33 @@ static void template_audio_download_callback(uint32_t msg_id, const char *save_p
     OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download in progress: %s", save_path ? save_path : "");
   } else if (msg_id == MSG_HTTP_DOWNLOAD_SUCCESS) {
     OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download SUCCESS: %s", save_path ? save_path : "");
+    if (save_path && (strstr(save_path, ".zip") || strstr(save_path, ".ZIP"))) {
+      OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Zip file detected: %s. Starting unzip to D:/FEMALE/...", save_path);
+      if (s_pending_audio_download_lang[0] != '\0') {
+        strncpy(g_sound_update_ctx.pending_lang, s_pending_audio_download_lang, sizeof(g_sound_update_ctx.pending_lang) - 1);
+        g_sound_update_ctx.pending_lang[sizeof(g_sound_update_ctx.pending_lang) - 1] = '\0';
+        s_pending_audio_download_lang[0] = '\0';
+      }
+      strncpy(g_sound_update_ctx.unzip_dest, "D:/FEMALE/", sizeof(g_sound_update_ctx.unzip_dest) - 1);
+      g_sound_update_ctx.is_sound_update_topic = false; // Not /sound-update, do not send ack
+      g_sound_update_ctx.state = TEMPLATE_SOUND_STATE_UNZIPPING;
+      int uz_ret = framework_unzip_start(save_path, "D:/FEMALE/", FRAMEWORK_UNZIP_TYPE_RESOURCES);
+      if (uz_ret != 0) {
+        OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Failed to start unzip (%d)", uz_ret);
+        template_sound_update_fail("unzip start failed");
+      }
+      return;
+    }
+
+    if (s_pending_audio_download_lang[0] != '\0') {
+      strncpy(s_default_language, s_pending_audio_download_lang, sizeof(s_default_language) - 1);
+      s_default_language[sizeof(s_default_language) - 1] = '\0';
+      template_save_language(s_default_language);
+      audio_resource_set_language_prefix("D:/FEMALE/");
+      OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download successful! Updated s_default_language to: %s", s_default_language);
+      s_pending_audio_download_lang[0] = '\0';
+    }
+
     if (save_path && save_path[0] != '\0') {
       // Play the newly downloaded MP3 file
       audio_resource_play_combo_async_mid_priority("", save_path, NULL, 1);
@@ -333,6 +560,7 @@ static void template_audio_download_callback(uint32_t msg_id, const char *save_p
     osiSysReset();
   } else if (msg_id == MSG_HTTP_DOWNLOAD_FAIL) {
     OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Download FAILED for: %s", save_path ? save_path : "");
+    s_pending_audio_download_lang[0] = '\0';
   }
 }
 
@@ -410,18 +638,6 @@ static int template_load_certificates_from_files(void) {
   g_template_cert_loaded = 1;
   OSI_LOGI(TAG, "[CERT] Certificates loaded from filesystem");
   return 0;
-}
-
-static char *prv_str_trim(char *str) {
-  if (!str) return "";
-  while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n') str++;
-  if (*str == 0) return str;
-  char *end = str + strlen(str) - 1;
-  while (end > str && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
-    *end = '\0';
-    end--;
-  }
-  return str;
 }
 
 static void template_handle_server_message(const char *topic,
@@ -611,20 +827,44 @@ static void template_handle_server_message(const char *topic,
     if (!j_lang) j_lang = cJSON_GetObjectItem(root, "Language");
     if (!j_lang) j_lang = cJSON_GetObjectItem(root, "lang");
     if (!j_lang) j_lang = cJSON_GetObjectItem(root, "Lang");
-    if (j_lang && cJSON_IsString(j_lang) && j_lang->valuestring && j_lang->valuestring[0] != '\0') {
-      strncpy(s_default_language, j_lang->valuestring, sizeof(s_default_language) - 1);
-      s_default_language[sizeof(s_default_language) - 1] = '\0';
-      OSI_LOGI(TAG, "[SOUND-UPDATE] active language set to: %s", s_default_language);
+
+    const cJSON *j_req_id = cJSON_GetObjectItem(root, "request_id");
+    if (!j_req_id) j_req_id = cJSON_GetObjectItem(root, "requestId");
+    if (!j_req_id) j_req_id = cJSON_GetObjectItem(root, "RequestId");
+
+    const cJSON *j_uuid = cJSON_GetObjectItem(root, "uuid");
+    if (!j_uuid) j_uuid = cJSON_GetObjectItem(root, "UUID");
+    if (!j_uuid) j_uuid = cJSON_GetObjectItem(root, "Uuid");
+
+    const cJSON *j_dev_id = cJSON_GetObjectItem(root, "deviceId");
+    if (!j_dev_id) j_dev_id = cJSON_GetObjectItem(root, "device_id");
+    if (!j_dev_id) j_dev_id = cJSON_GetObjectItem(root, "DeviceId");
+    if (!j_dev_id) j_dev_id = cJSON_GetObjectItem(root, "serial_no");
+
+    double req_id = 0;
+    if (j_req_id) {
+      if (cJSON_IsNumber(j_req_id)) {
+        req_id = j_req_id->valuedouble;
+      } else if (cJSON_IsString(j_req_id) && j_req_id->valuestring) {
+        req_id = strtod(j_req_id->valuestring, NULL);
+      }
     }
+    const char *uuid_str = (j_uuid && cJSON_IsString(j_uuid)) ? j_uuid->valuestring : NULL;
+    const char *dev_id_str = (j_dev_id && cJSON_IsString(j_dev_id)) ? j_dev_id->valuestring : NULL;
+
     const char *url =
         (j_url && cJSON_IsString(j_url)) ? j_url->valuestring : NULL;
     const char *md5 =
         (j_md5 && cJSON_IsString(j_md5)) ? j_md5->valuestring : NULL;
     const char *dst =
         (j_dst && cJSON_IsString(j_dst)) ? j_dst->valuestring : NULL;
-    OSI_LOGI(TAG, "[SOUND-UPDATE] url=%s md5=%s dst=%s lang=%s", url ? url : "(null)",
-             md5 ? md5 : "(none)", dst ? dst : "(default: D:/FEMALE/)", s_default_language);
-    if (template_start_sound_update(url, md5, dst) != 0) {
+    const char *req_lang =
+        (j_lang && cJSON_IsString(j_lang)) ? j_lang->valuestring : NULL;
+
+    OSI_LOGI(TAG, "[SOUND-UPDATE] url=%s md5=%s dst=%s req_lang=%s req_id=%.0f uuid=%s dev_id=%s",
+             url ? url : "(null)", md5 ? md5 : "(none)", dst ? dst : "(default: D:/FEMALE/)",
+             req_lang ? req_lang : "(none)", req_id, uuid_str ? uuid_str : "(none)", dev_id_str ? dev_id_str : "(none)");
+    if (template_start_sound_update(url, md5, dst, req_lang, true, req_id, uuid_str, dev_id_str) != 0) {
       OSI_LOGE(TAG, "[SOUND-UPDATE] request rejected");
     }
   } else if (strstr(topic, "/ota-update")) {
@@ -670,15 +910,48 @@ static void template_handle_server_message(const char *topic,
     if (!j_lang) j_lang = cJSON_GetObjectItem(root, "language");
     if (!j_lang) j_lang = cJSON_GetObjectItem(root, "Language");
     if (!j_lang) j_lang = cJSON_GetObjectItem(root, "lang");
+    if (!j_lang) j_lang = cJSON_GetObjectItem(root, "active_language");
     const char *lang =
         j_lang && cJSON_IsString(j_lang) ? j_lang->valuestring : "";
     OSI_LOGI(TAG, "[LANG-UPDATE] lang_support=%s", lang);
     if (lang && lang[0] != '\0') {
       strncpy(s_default_language, lang, sizeof(s_default_language) - 1);
       s_default_language[sizeof(s_default_language) - 1] = '\0';
+      template_save_language(s_default_language);
     }
     audio_resource_set_language_prefix("D:/FEMALE/");
     OSI_LOGI(TAG, "[LANG-UPDATE] active language set to: %s (folder: D:/FEMALE/)", s_default_language);
+
+    // Extract fields or fallback to hardcoded sample values
+    const cJSON *j_req_id = cJSON_GetObjectItem(root, "request_id");
+    if (!j_req_id) j_req_id = cJSON_GetObjectItem(root, "requestId");
+    if (!j_req_id) j_req_id = cJSON_GetObjectItem(root, "RequestId");
+
+    const cJSON *j_dev_id = cJSON_GetObjectItem(root, "deviceId");
+    if (!j_dev_id) j_dev_id = cJSON_GetObjectItem(root, "device_id");
+    if (!j_dev_id) j_dev_id = cJSON_GetObjectItem(root, "DeviceId");
+    if (!j_dev_id) j_dev_id = cJSON_GetObjectItem(root, "serial_no");
+
+    const cJSON *j_act_lang = cJSON_GetObjectItem(root, "active_language");
+    if (!j_act_lang) j_act_lang = cJSON_GetObjectItem(root, "active_lang");
+    if (!j_act_lang) j_act_lang = j_lang;
+
+    double req_id = 0;
+    if (j_req_id) {
+      if (cJSON_IsNumber(j_req_id)) {
+        req_id = j_req_id->valuedouble;
+      } else if (cJSON_IsString(j_req_id) && j_req_id->valuestring) {
+        req_id = strtod(j_req_id->valuestring, NULL);
+      }
+    }
+    const char *dev_id_str = (j_dev_id && cJSON_IsString(j_dev_id)) ? j_dev_id->valuestring : NULL;
+    const char *act_lang_str = (j_act_lang && cJSON_IsString(j_act_lang)) ? j_act_lang->valuestring : NULL;
+
+    customer_send_change_language_ack(req_id,
+                                      dev_id_str,
+                                      " Success ",
+                                      "",
+                                      act_lang_str);
   } else if (strstr(topic, "/activation")) {
     // {"status":"SUCCESS"}
     const cJSON *j_status = cJSON_GetObjectItem(root, "status");
@@ -696,11 +969,8 @@ static void template_handle_server_message(const char *topic,
     if (!j_lang) j_lang = cJSON_GetObjectItem(root, "Language");
     if (!j_lang) j_lang = cJSON_GetObjectItem(root, "lang");
     if (!j_lang) j_lang = cJSON_GetObjectItem(root, "Lang");
-    if (j_lang && cJSON_IsString(j_lang) && j_lang->valuestring && j_lang->valuestring[0] != '\0') {
-      strncpy(s_default_language, j_lang->valuestring, sizeof(s_default_language) - 1);
-      s_default_language[sizeof(s_default_language) - 1] = '\0';
-      OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] active language set to: %s", s_default_language);
-    }
+    const char *lang_str = (j_lang && cJSON_IsString(j_lang) && j_lang->valuestring && j_lang->valuestring[0] != '\0')
+                           ? j_lang->valuestring : NULL;
 
     const char *url = (j_url && cJSON_IsString(j_url)) ? j_url->valuestring : "";
     const char *dst = (j_dst && cJSON_IsString(j_dst)) ? j_dst->valuestring : "";
@@ -716,12 +986,47 @@ static void template_handle_server_message(const char *topic,
           should_download = true;
         }
       }
+    } else {
+      if (url && url[0] != '\0') {
+        should_download = true;
+      }
     }
 
-    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] download=%d, url=%s, dst=%s",
-             should_download, url, dst);
+    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] download=%d, url=%s, dst=%s, lang=%s",
+             should_download, url, dst, lang_str ? lang_str : "(none)");
 
     if (should_download && url[0] != '\0') {
+      bool is_zip = false;
+      if (strstr(url, ".zip") || strstr(url, ".ZIP")) {
+        is_zip = true;
+      }
+      if (dst && (strstr(dst, ".zip") || strstr(dst, ".ZIP"))) {
+        is_zip = true;
+      }
+
+      if (is_zip) {
+        const char *target_dst = (dst && dst[0] != '\0' && !strstr(dst, ".zip") && !strstr(dst, ".ZIP"))
+                                 ? dst : "D:/FEMALE/";
+        OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Zip package detected, delegating to sound update: url=%s dst=%s pending_lang=%s",
+                 url, target_dst, lang_str ? lang_str : "(none)");
+        int ret = template_start_sound_update(url, NULL, target_dst, lang_str, false, 0, NULL, NULL);
+        if (ret != 0) {
+          OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Failed to start sound update (%d)", ret);
+        }
+        cJSON_Delete(root);
+        return;
+      }
+
+      // Single file download (e.g. mp3) - defer language update until download finishes
+      if (lang_str) {
+        strncpy(s_pending_audio_download_lang, lang_str, sizeof(s_pending_audio_download_lang) - 1);
+        s_pending_audio_download_lang[sizeof(s_pending_audio_download_lang) - 1] = '\0';
+        OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Pending language: %s (will apply after successful download)",
+                 s_pending_audio_download_lang);
+      } else {
+        s_pending_audio_download_lang[0] = '\0';
+      }
+
       char final_dst[128] = {0};
       if (dst && dst[0] != '\0') {
         if (dst[0] == 'D' && dst[1] == ':' && dst[2] == '/') {
@@ -850,6 +1155,7 @@ static int customer_mqtt_config_handler(mqtt_config_t *config) {
 }
 
 int customer_mqtt_init(void) {
+  customer_language_init();
   if (g_mqtt_initialized) {
     // OSI_LOGI(TAG, "MQTT already initialized! state: %d",
     // framework_mqtt_get_state()); if(framework_mqtt_get_state() ==

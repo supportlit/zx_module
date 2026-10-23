@@ -432,19 +432,51 @@ static int prv_download_file_task(const char *url, const char *save_path, http_d
     int last_percent = -1;
 
     while (offset < total_size) {
-        memset(&client, 0, sizeof(client));
-        memset(&client_data, 0, sizeof(client_data));
         int chunk = (total_size - offset > HTTP_DOWNLOAD_CHUNK_SIZE) ? HTTP_DOWNLOAD_CHUNK_SIZE : (total_size - offset);
         char range_header[64];
         snprintf(range_header, sizeof(range_header), "Range: bytes=%d-%d\r\n", offset, offset + chunk - 1);
         OSI_LOGI(0, "requesting range %s", range_header);
-        client.header = range_header;
-        client_data.response_buf = buf;
-        client_data.response_buf_len = chunk + 1;
-        client_data.response_content_len = 0;
 
-        int http_ret = httpclient_get(&client, (char *)url, &client_data);
-        if ((http_ret < 0) || client_data.response_content_len <= 0) {
+        int chunk_success = 0;
+        int max_retries = 3;
+        int last_http_ret = -1;
+        int last_resp_code = 0;
+
+        for (int retry = 0; retry < max_retries; retry++) {
+            if (retry > 0) {
+                OSI_LOGI(TAG, "Retrying chunk at offset %d (attempt %d/%d)...", offset, retry + 1, max_retries);
+                osiThreadSleep(1000);
+            }
+
+            memset(&client, 0, sizeof(client));
+            memset(&client_data, 0, sizeof(client_data));
+            client.header = range_header;
+            client_data.response_buf = buf;
+            client_data.response_buf_len = chunk + 1;
+            client_data.response_content_len = 0;
+
+            int http_ret = httpclient_get(&client, (char *)url, &client_data);
+            int resp_code = client.response_code;
+            last_http_ret = http_ret;
+            last_resp_code = resp_code;
+
+            if (http_ret >= 0 && client_data.response_content_len > 0) {
+                if (resp_code == 200 && offset > 0) {
+                    OSI_LOGE(TAG, "FATAL: Server returned 200 OK instead of 206 Partial Content for offset %d! Server does not support HTTP Range.", offset);
+                    last_http_ret = -10;
+                    break;
+                }
+                chunk_success = 1;
+                break;
+            }
+
+            OSI_LOGE(TAG, "Chunk at offset %d attempt %d/%d failed: ret=%d, resp_code=%d, len=%d",
+                     offset, retry + 1, max_retries, http_ret, resp_code, client_data.response_content_len);
+        }
+
+        if (!chunk_success) {
+            OSI_LOGE(TAG, "Chunk at offset %d failed after %d attempts (ret=%d, resp_code=%d)",
+                     offset, max_retries, last_http_ret, last_resp_code);
             fs_close(fd);
             free(buf);
             mbedtls_md5_free(&md5_ctx);
@@ -452,7 +484,8 @@ static int prv_download_file_task(const char *url, const char *save_path, http_d
             if(callback){callback(MSG_HTTP_DOWNLOAD_FAIL, save_path, arg);}
             return -5;
         }
-        OSI_LOGI(0, "received %d bytes", client_data.response_content_len);
+
+        OSI_LOGI(0, "received %d bytes (code=%d)", client_data.response_content_len, client.response_code);
 
         while (audio_resource_is_playing())
         {

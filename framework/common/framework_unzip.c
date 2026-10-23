@@ -394,6 +394,18 @@ static void prv_normalize_path(char *path)
             path[i] = '/';
         }
     }
+    // Collapse duplicate slashes "//" -> "/" (ignoring "D:/")
+    char *src = path;
+    char *dst = path;
+    while (*src != '\0') {
+        *dst++ = *src++;
+        if (*(dst - 1) == '/' && (dst - path) > 3) {
+            while (*src == '/') {
+                src++;
+            }
+        }
+    }
+    *dst = '\0';
 }
 
 static void prv_trim_trailing_slash(char *path)
@@ -536,6 +548,17 @@ static int prv_extract_current_file(unzFile zip_file, const char *dest_path)
     return 0;
 }
 
+static const char *prv_get_basename(const char *path)
+{
+    if (!path) return "";
+    const char *p = strrchr(path, '/');
+    const char *p2 = strrchr(path, '\\');
+    if (p2 && (!p || p2 > p)) {
+        p = p2;
+    }
+    return p ? (p + 1) : path;
+}
+
 static int prv_unzip_folder(const char *zip_file_path,
                             const char *output_dir,
                             framework_unzip_progress_cb progress_cb,
@@ -549,9 +572,32 @@ static int prv_unzip_folder(const char *zip_file_path,
         return prv_unzip_czip(zip_file_path, output_dir, progress_cb, user_ctx);
     }
 
+    uint32_t f_size = fs_size(zip_file_path);
+    OSI_LOGI(TAG, "Unzipping file: %s (size: %u bytes) -> %s", zip_file_path, f_size, output_dir);
+    if (f_size == 0) {
+        OSI_LOGE(TAG, "Zip file %s does not exist or is empty (0 bytes)", zip_file_path);
+        return -2;
+    }
+
+    int test_fd = fs_open(zip_file_path, "rb");
+    if (test_fd > 0) {
+        uint8_t hdr[4] = {0};
+        fs_read(hdr, 1, 4, test_fd);
+        fs_close(test_fd);
+        OSI_LOGI(TAG, "Zip header: [0x%02X 0x%02X 0x%02X 0x%02X] ('%c%c%c%c')",
+                 hdr[0], hdr[1], hdr[2], hdr[3],
+                 (hdr[0] >= 32 && hdr[0] <= 126) ? hdr[0] : '.',
+                 (hdr[1] >= 32 && hdr[1] <= 126) ? hdr[1] : '.',
+                 (hdr[2] >= 32 && hdr[2] <= 126) ? hdr[2] : '.',
+                 (hdr[3] >= 32 && hdr[3] <= 126) ? hdr[3] : '.');
+        if (hdr[0] != 0x50 || hdr[1] != 0x4B || hdr[2] != 0x03 || hdr[3] != 0x04) {
+            OSI_LOGE(TAG, "WARNING: File %s does NOT have standard ZIP magic (PK\\x03\\x04)!", zip_file_path);
+        }
+    }
+
     unzFile zip_file = unzOpen(zip_file_path);
     if (zip_file == NULL) {
-        OSI_LOGE(TAG, "Cannot open zip file %s", zip_file_path);
+        OSI_LOGE(TAG, "Cannot open zip file %s (unzOpen returned NULL)", zip_file_path);
         return -2;
     }
 
@@ -574,6 +620,8 @@ static int prv_unzip_folder(const char *zip_file_path,
         return -4;
     }
 
+    prv_create_directory_recursive(output_dir);
+
     uint32_t current_entry = 0;
     int go_next_ret = UNZ_OK;
 
@@ -588,24 +636,44 @@ static int prv_unzip_folder(const char *zip_file_path,
         }
 
         framework_unzip_bool_t is_dir = prv_is_directory_entry(filename);
+        if (is_dir) {
+            current_entry++;
+            if (progress_cb) {
+                progress_cb(filename, current_entry, total_entries, user_ctx);
+            }
+            go_next_ret = unzGoToNextFile(zip_file);
+            continue;
+        }
+
+        // Flatten path: extract directly into output_dir (e.g. D:/FEMALE/id_01.mp3)
+        const char *base_name = prv_get_basename(filename);
+        if (!base_name || base_name[0] == '\0') {
+            current_entry++;
+            if (progress_cb) {
+                progress_cb(filename, current_entry, total_entries, user_ctx);
+            }
+            go_next_ret = unzGoToNextFile(zip_file);
+            continue;
+        }
+
         char full_path[APP_UNZIP_MAX_PATH * 2];
-        snprintf(full_path, sizeof(full_path), "%s/%s", output_dir, filename);
+        size_t out_len = strlen(output_dir);
+        if (out_len > 0 && (output_dir[out_len - 1] == '/' || output_dir[out_len - 1] == '\\')) {
+            snprintf(full_path, sizeof(full_path), "%s%s", output_dir, base_name);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", output_dir, base_name);
+        }
         prv_normalize_path(full_path);
 
-        if (is_dir) {
-            prv_create_directory_recursive(full_path);
-            OSI_LOGI(TAG, "Created directory %s", full_path);
-        } else {
-            ret = prv_extract_current_file(zip_file, full_path);
-            if (ret != 0) {
-                break;
-            }
-            OSI_LOGI(TAG, "Extracted file %s", full_path);
+        ret = prv_extract_current_file(zip_file, full_path);
+        if (ret != 0) {
+            break;
         }
+        OSI_LOGI(TAG, "Extracted file %s", full_path);
 
         current_entry++;
         if (progress_cb) {
-            progress_cb(filename, current_entry, total_entries, user_ctx);
+            progress_cb(base_name, current_entry, total_entries, user_ctx);
         }
 
         go_next_ret = unzGoToNextFile(zip_file);

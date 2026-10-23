@@ -1379,6 +1379,7 @@ void customer_init(void)
 
     framework_audio_set_volume_gain_list(vol_list, VOL_MAX);
     audio_volume_set(framework_device_config_get_volume());
+    customer_language_init();
 
     framework_led_clear_all();
     prv_battery_led_gpio_init();
