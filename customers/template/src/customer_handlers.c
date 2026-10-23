@@ -1239,6 +1239,27 @@ int customer_msg_handler(framework_msg_t *msg)
             }
             return 0;
         }
+        else if (dl_type == HTTP_DOWNLOAD_TYPE_FILE)
+        {
+            switch (msg->id)
+            {
+            case MSG_HTTP_DOWNLOAD_START:
+                OSI_LOGI(TAG, "File download started: %s", (const char *)(uintptr_t)msg->param3);
+                break;
+            case MSG_HTTP_DOWNLOAD_PROGRESS:
+                OSI_LOGI(TAG, "File download progress: %d%%", msg->param2);
+                break;
+            case MSG_HTTP_DOWNLOAD_SUCCESS:
+                OSI_LOGI(TAG, "File download success: %s", (const char *)(uintptr_t)msg->param3);
+                break;
+            case MSG_HTTP_DOWNLOAD_FAIL:
+                OSI_LOGE(TAG, "File download failed (err=%d)", msg->param2);
+                break;
+            default:
+                break;
+            }
+            return 0;
+        }
 
         break;
     }

@@ -96,9 +96,11 @@ static const char *g_template_topics[] = {
     "BP1/%s/ota-update",
     "BP1/%s/restart",
     "BP1/%s/update-lang",
-    "BP1/%s/activation"};
+    "BP1/%s/activation",
+    "BP1/%s/audio-download",
+    "/audio-download"};
 static char sn[32] = {0};
-static char sub_topic[8][128] = {0};
+static char sub_topic[16][128] = {0};
 
 static void template_sound_reset_ctx(void) {
   g_sound_update_ctx.state = TEMPLATE_SOUND_STATE_IDLE;
@@ -295,6 +297,27 @@ static void template_handle_unzip_msg(framework_msg_t *msg) {
     break;
   default:
     break;
+  }
+}
+
+static void template_audio_download_callback(uint32_t msg_id, const char *save_path, void *user_data) {
+  if (msg_id == MSG_HTTP_DOWNLOAD_START) {
+    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download started: %s", save_path ? save_path : "");
+  } else if (msg_id == MSG_HTTP_DOWNLOAD_PROGRESS) {
+    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download in progress: %s", save_path ? save_path : "");
+  } else if (msg_id == MSG_HTTP_DOWNLOAD_SUCCESS) {
+    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download SUCCESS: %s", save_path ? save_path : "");
+    if (save_path && save_path[0] != '\0') {
+      // Play the newly downloaded MP3 file
+      audio_resource_play_combo_async_mid_priority("", save_path, NULL, 1);
+    }
+    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Restarting device in 3 seconds...");
+    osiThreadSleep(3000); // Allow audio to play before reset
+    customer_dux_publish_device_power(0);
+    osiThreadSleep(500);
+    osiSysReset();
+  } else if (msg_id == MSG_HTTP_DOWNLOAD_FAIL) {
+    OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Download FAILED for: %s", save_path ? save_path : "");
   }
 }
 
@@ -616,6 +639,76 @@ static void template_handle_server_message(const char *topic,
     OSI_LOGI(TAG, "[ACTIVATION] status=%s", status);
     audio_resource_play_combo_async_mid_priority(
         PAYMENT_AUDIO_FOLDER, "activation-device.mp3", NULL, 1);
+  } else if (strstr(topic, "audio-download")) {
+    // {"download":"true","url":"...","dst":"..."}
+    const cJSON *j_dl = cJSON_GetObjectItem(root, "download");
+    const cJSON *j_url = cJSON_GetObjectItem(root, "url");
+    const cJSON *j_dst = cJSON_GetObjectItem(root, "dst");
+
+    const char *url = (j_url && cJSON_IsString(j_url)) ? j_url->valuestring : "";
+    const char *dst = (j_dst && cJSON_IsString(j_dst)) ? j_dst->valuestring : "";
+
+    bool should_download = false;
+    if (j_dl) {
+      if (cJSON_IsBool(j_dl)) {
+        should_download = (j_dl->type == cJSON_True);
+      } else if (cJSON_IsString(j_dl) && j_dl->valuestring) {
+        if (strcmp(j_dl->valuestring, "true") == 0 ||
+            strcmp(j_dl->valuestring, "TRUE") == 0 ||
+            strcmp(j_dl->valuestring, "1") == 0) {
+          should_download = true;
+        }
+      }
+    }
+
+    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] download=%d, url=%s, dst=%s",
+             should_download, url, dst);
+
+    if (should_download && url[0] != '\0') {
+      char final_dst[128] = {0};
+      if (dst && dst[0] != '\0') {
+        if (dst[0] == 'D' && dst[1] == ':' && dst[2] == '/') {
+          strncpy(final_dst, dst, sizeof(final_dst) - 1);
+        } else {
+          snprintf(final_dst, sizeof(final_dst), "D:/%s",
+                   (dst[0] == '/') ? dst + 1 : dst);
+        }
+      } else {
+        const char *slash = strrchr(url, '/');
+        const char *fname = (slash && *(slash + 1)) ? (slash + 1) : "downloaded_audio.mp3";
+        char clean_name[64] = {0};
+        strncpy(clean_name, fname, sizeof(clean_name) - 1);
+        char *qmark = strchr(clean_name, '?');
+        if (qmark) {
+          *qmark = '\0';
+        }
+        snprintf(final_dst, sizeof(final_dst), "D:/%s",
+                 clean_name[0] ? clean_name : "downloaded_audio.mp3");
+      }
+
+      // Ensure parent directory exists if a subfolder is specified (e.g. D:/FEMALE/)
+      char *last_slash = strrchr(final_dst, '/');
+      if (last_slash && last_slash != final_dst && last_slash != (final_dst + 2)) {
+        char dir_buf[128] = {0};
+        size_t dir_len = (size_t)(last_slash - final_dst);
+        if (dir_len < sizeof(dir_buf)) {
+          strncpy(dir_buf, final_dst, dir_len);
+          fs_makedir(dir_buf);
+        }
+      }
+
+      int ret = framework_http_download_file_callback(
+          url, final_dst, HTTP_DOWNLOAD_TYPE_FILE,
+          template_audio_download_callback, NULL);
+      if (ret != 0) {
+        OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Failed to queue download (%d)", ret);
+      } else {
+        OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download queued successfully: %s -> %s",
+                 url, final_dst);
+      }
+    } else {
+      OSI_LOGW(TAG, "[AUDIO-DOWNLOAD] Ignored: download flag false or url empty");
+    }
   } else {
     OSI_LOGI(TAG, "Received message on unknown topic: %s", topic);
   }
@@ -645,7 +738,7 @@ static void template_mqtt_event_callback(mqtt_event_e event, void *data) {
 
     // Start status reporting after MQTT connection is established (1 min interval)
     OSI_LOGI(TAG, "Starting status report (interval: 1 min / 60 sec)");
-    customer_status_report_start(60);
+    customer_status_report_start(15*60);
   } else if (event == MQTT_EVENT_DISCONNECTED) {
     OSI_LOGW(TAG, "MQTT disconnected, stopping status report");
     // customer_status_report_stop();
