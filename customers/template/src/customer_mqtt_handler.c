@@ -597,6 +597,7 @@ static void template_handle_server_message(const char *topic,
         j_restart && cJSON_IsString(j_restart) ? j_restart->valuestring : "";
     OSI_LOGI(TAG, "[RESTART] restart=%s", restart);
     if (strcmp(restart, "true") == 0) {
+      customer_dux_publish_device_power(0);
       osiSysReset();
     }
   } else if (strstr(topic, "/update-lang")) {
