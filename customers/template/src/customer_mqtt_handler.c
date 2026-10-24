@@ -6,6 +6,7 @@
 #include "customer_payment_handler.h"
 #include "customer_status_report.h"
 #include "customer_app_update.h"
+#include "customer_audio_download.h"
 #include "framework_audio.h"
 #include "framework_device_config.h"
 #include "framework_http.h"
@@ -76,7 +77,7 @@ static void template_sound_update_fail(const char *reason);
 static void template_sound_update_success(void);
 static int template_calc_file_md5(const char *path, char *md5_out33);
 static int template_compare_checksum(const char *expected, const char *actual);
-static int template_start_sound_update(const char *url, const char *checksum, const char *dst, const char *lang,
+int template_start_sound_update(const char *url, const char *checksum, const char *dst, const char *lang,
                                       bool is_sound_update_topic,
                                       double request_id, const char *uuid, const char *device_id);
 static void template_handle_http_download_msg(framework_msg_t *msg);
@@ -342,7 +343,7 @@ static void template_sound_update_success(void) {
   template_sound_reset_ctx();
 }
 
-static int template_start_sound_update(const char *url, const char *checksum, const char *dst, const char *lang,
+int template_start_sound_update(const char *url, const char *checksum, const char *dst, const char *lang,
                                       bool is_sound_update_topic,
                                       double request_id, const char *uuid, const char *device_id) {
   if (!url || url[0] == '\0') {
@@ -514,56 +515,7 @@ static void template_handle_unzip_msg(framework_msg_t *msg) {
   }
 }
 
-static char s_pending_audio_download_lang[16] = {0};
 
-static void template_audio_download_callback(uint32_t msg_id, const char *save_path, void *user_data) {
-  if (msg_id == MSG_HTTP_DOWNLOAD_START) {
-    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download started: %s", save_path ? save_path : "");
-  } else if (msg_id == MSG_HTTP_DOWNLOAD_PROGRESS) {
-    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download in progress: %s", save_path ? save_path : "");
-  } else if (msg_id == MSG_HTTP_DOWNLOAD_SUCCESS) {
-    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download SUCCESS: %s", save_path ? save_path : "");
-    if (save_path && (strstr(save_path, ".zip") || strstr(save_path, ".ZIP"))) {
-      OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Zip file detected: %s. Starting unzip to D:/FEMALE/...", save_path);
-      if (s_pending_audio_download_lang[0] != '\0') {
-        strncpy(g_sound_update_ctx.pending_lang, s_pending_audio_download_lang, sizeof(g_sound_update_ctx.pending_lang) - 1);
-        g_sound_update_ctx.pending_lang[sizeof(g_sound_update_ctx.pending_lang) - 1] = '\0';
-        s_pending_audio_download_lang[0] = '\0';
-      }
-      strncpy(g_sound_update_ctx.unzip_dest, "D:/FEMALE/", sizeof(g_sound_update_ctx.unzip_dest) - 1);
-      g_sound_update_ctx.is_sound_update_topic = false; // Not /sound-update, do not send ack
-      g_sound_update_ctx.state = TEMPLATE_SOUND_STATE_UNZIPPING;
-      int uz_ret = framework_unzip_start(save_path, "D:/FEMALE/", FRAMEWORK_UNZIP_TYPE_RESOURCES);
-      if (uz_ret != 0) {
-        OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Failed to start unzip (%d)", uz_ret);
-        template_sound_update_fail("unzip start failed");
-      }
-      return;
-    }
-
-    if (s_pending_audio_download_lang[0] != '\0') {
-      strncpy(s_default_language, s_pending_audio_download_lang, sizeof(s_default_language) - 1);
-      s_default_language[sizeof(s_default_language) - 1] = '\0';
-      template_save_language(s_default_language);
-      audio_resource_set_language_prefix("D:/FEMALE/");
-      OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download successful! Updated s_default_language to: %s", s_default_language);
-      s_pending_audio_download_lang[0] = '\0';
-    }
-
-    if (save_path && save_path[0] != '\0') {
-      // Play the newly downloaded MP3 file
-      audio_resource_play_combo_async_mid_priority("", save_path, NULL, 1);
-    }
-    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Restarting device in 3 seconds...");
-    osiThreadSleep(3000); // Allow audio to play before reset
-    customer_dux_publish_device_power(0);
-    osiThreadSleep(500);
-    osiSysReset();
-  } else if (msg_id == MSG_HTTP_DOWNLOAD_FAIL) {
-    OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Download FAILED for: %s", save_path ? save_path : "");
-    s_pending_audio_download_lang[0] = '\0';
-  }
-}
 
 static int template_load_file_into_buffer(const char *path, char *buffer,
                                           uint32_t max_len, uint32_t *out_len) {
@@ -942,116 +894,7 @@ static void template_handle_server_message(const char *topic,
     audio_resource_play_combo_async_mid_priority(
         PAYMENT_AUDIO_FOLDER, "activation-device.mp3", NULL, 1);
   } else if (strstr(topic, "audio-download")) {
-    // {"download":"true","url":"...","dst":"..."}
-    const cJSON *j_dl = cJSON_GetObjectItem(root, "download");
-    const cJSON *j_url = cJSON_GetObjectItem(root, "url");
-    const cJSON *j_dst = cJSON_GetObjectItem(root, "dst");
-    const cJSON *j_lang = cJSON_GetObjectItem(root, "language");
-    if (!j_lang) j_lang = cJSON_GetObjectItem(root, "Language");
-    if (!j_lang) j_lang = cJSON_GetObjectItem(root, "lang");
-    if (!j_lang) j_lang = cJSON_GetObjectItem(root, "Lang");
-    const char *lang_str = (j_lang && cJSON_IsString(j_lang) && j_lang->valuestring && j_lang->valuestring[0] != '\0')
-                           ? j_lang->valuestring : NULL;
-
-    const char *url = (j_url && cJSON_IsString(j_url)) ? j_url->valuestring : "";
-    const char *dst = (j_dst && cJSON_IsString(j_dst)) ? j_dst->valuestring : "";
-
-    bool should_download = false;
-    if (j_dl) {
-      if (cJSON_IsBool(j_dl)) {
-        should_download = (j_dl->type == cJSON_True);
-      } else if (cJSON_IsString(j_dl) && j_dl->valuestring) {
-        if (strcmp(j_dl->valuestring, "true") == 0 ||
-            strcmp(j_dl->valuestring, "TRUE") == 0 ||
-            strcmp(j_dl->valuestring, "1") == 0) {
-          should_download = true;
-        }
-      }
-    } else {
-      if (url && url[0] != '\0') {
-        should_download = true;
-      }
-    }
-
-    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] download=%d, url=%s, dst=%s, lang=%s",
-             should_download, url, dst, lang_str ? lang_str : "(none)");
-
-    if (should_download && url[0] != '\0') {
-      bool is_zip = false;
-      if (strstr(url, ".zip") || strstr(url, ".ZIP")) {
-        is_zip = true;
-      }
-      if (dst && (strstr(dst, ".zip") || strstr(dst, ".ZIP"))) {
-        is_zip = true;
-      }
-
-      if (is_zip) {
-        const char *target_dst = (dst && dst[0] != '\0' && !strstr(dst, ".zip") && !strstr(dst, ".ZIP"))
-                                 ? dst : "D:/FEMALE/";
-        OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Zip package detected, delegating to sound update: url=%s dst=%s pending_lang=%s",
-                 url, target_dst, lang_str ? lang_str : "(none)");
-        int ret = template_start_sound_update(url, NULL, target_dst, lang_str, false, 0, NULL, NULL);
-        if (ret != 0) {
-          OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Failed to start sound update (%d)", ret);
-        }
-        cJSON_Delete(root);
-        return;
-      }
-
-      // Single file download (e.g. mp3) - defer language update until download finishes
-      if (lang_str) {
-        strncpy(s_pending_audio_download_lang, lang_str, sizeof(s_pending_audio_download_lang) - 1);
-        s_pending_audio_download_lang[sizeof(s_pending_audio_download_lang) - 1] = '\0';
-        OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Pending language: %s (will apply after successful download)",
-                 s_pending_audio_download_lang);
-      } else {
-        s_pending_audio_download_lang[0] = '\0';
-      }
-
-      char final_dst[128] = {0};
-      if (dst && dst[0] != '\0') {
-        if (dst[0] == 'D' && dst[1] == ':' && dst[2] == '/') {
-          strncpy(final_dst, dst, sizeof(final_dst) - 1);
-        } else {
-          snprintf(final_dst, sizeof(final_dst), "D:/%s",
-                   (dst[0] == '/') ? dst + 1 : dst);
-        }
-      } else {
-        const char *slash = strrchr(url, '/');
-        const char *fname = (slash && *(slash + 1)) ? (slash + 1) : "downloaded_audio.mp3";
-        char clean_name[64] = {0};
-        strncpy(clean_name, fname, sizeof(clean_name) - 1);
-        char *qmark = strchr(clean_name, '?');
-        if (qmark) {
-          *qmark = '\0';
-        }
-        snprintf(final_dst, sizeof(final_dst), "D:/%s",
-                 clean_name[0] ? clean_name : "downloaded_audio.mp3");
-      }
-
-      // Ensure parent directory exists if a subfolder is specified (e.g. D:/FEMALE/)
-      char *last_slash = strrchr(final_dst, '/');
-      if (last_slash && last_slash != final_dst && last_slash != (final_dst + 2)) {
-        char dir_buf[128] = {0};
-        size_t dir_len = (size_t)(last_slash - final_dst);
-        if (dir_len < sizeof(dir_buf)) {
-          strncpy(dir_buf, final_dst, dir_len);
-          fs_makedir(dir_buf);
-        }
-      }
-
-      int ret = framework_http_download_file_callback(
-          url, final_dst, HTTP_DOWNLOAD_TYPE_FILE,
-          template_audio_download_callback, NULL);
-      if (ret != 0) {
-        OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Failed to queue download (%d)", ret);
-      } else {
-        OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Download queued successfully: %s -> %s",
-                 url, final_dst);
-      }
-    } else {
-      OSI_LOGW(TAG, "[AUDIO-DOWNLOAD] Ignored: download flag false or url empty");
-    }
+    customer_audio_download_from_json(root);
   } else {
     OSI_LOGI(TAG, "Received message on unknown topic: %s", topic);
   }

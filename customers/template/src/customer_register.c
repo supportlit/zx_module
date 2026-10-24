@@ -13,12 +13,18 @@
 #include "audio_resource_map.h"
 #include "customer_mqtt_handler.h"
 #include "customer_status_report.h"
+#include "cJSON.h"
+#include "customer_app_update.h"
+#include "customer_config.h"
+#include "customer_audio_download.h"
+#include "fs_api.h"
+#include "TmsExceptionDownload.h"
 #include "osi_api.h"
 #define MAX_REDIRECT_HOPS 3
 #define TAG "TMS_REG"
 #define TMS_REGISTRATION_URL \
     "https://1.7.140.58/pos/TMS/V1/SoundBoxManagement/SBLogin"
-// #define TMS_REGISTRATION_URL \
+// #define TMS_REGISTRATION_URL
 //     "https://script.google.com/macros/s/AKfycbyb43uMq36LyLPdg3I1BRsf5PqosOi0Igu3YwXVz2rA0IWoJizPMWE_8Kswt6tUtXFS/exec"
 #define TMS_MAX_FIELDS 32
 #define TMS_RESPONSE_BUFFER_SIZE 4096
@@ -250,6 +256,7 @@ int tms_register_device_sync(tms_registration_resp_t *out_resp)
     OSI_LOGI(TAG, "HTTP 200 received; response length=%u",
              (unsigned int)strlen(resp_buf));
 
+    const char *data_to_parse = (resp_buf && strlen(resp_buf) > 0) ? resp_buf : s_hardcoded_pipe_resp;
     ret_status = parse_tms_registration_response(s_hardcoded_pipe_resp, out_resp);
     if (ret_status != 0)
     {
@@ -435,24 +442,82 @@ void tms_registration_task(void *param)
         memset(&tms_info, 0, sizeof(tms_info));
         OSI_LOGI(TAG, "TMS registration attempt %u", attempts);
 
+        int res = tms_register_device_sync(&tms_info);
+        // int res = tms_register_with_redirect(&tms_info);
+
+        /* 1. Validate registration function result & confirm response was parsed successfully */
+        if (res == 0)
         {
-            int res = tms_register_device_sync(&tms_info);
-            // int res = tms_register_with_redirect(&tms_info);
-            if (res == 0 && tms_response_is_accepted(&tms_info))
+            /* 2. Inspect the actual response code field */
+            if (strcmp(tms_info.response_code, "9999") == 0)
+            {
+                /* 4. If response code == 9999: */
+                /* a. Read app_download_url from tms_info */
+                const char *url = tms_info.app_download_url;
+
+                /* Validate that the URL is present, non-empty, and within bounds */
+                if (url && url[0] != '\0' && strlen(url) < sizeof(tms_info.app_download_url))
+                {
+                    /* b. Print only the URL value */
+                    OSI_LOGI(TAG, "%s", url);
+
+                    /* Play upgrade chime */
+                    audio_resource_play_combo_async_mid_priority("", "upgrade-start.mp3", NULL, 1);
+
+                    /* c. Build JSON: {"url": "<dynamic app_download_url>"} */
+                    cJSON *json_obj = cJSON_CreateObject();
+                    if (json_obj != NULL)
+                    {
+                        cJSON_AddStringToObject(json_obj, "url", url);
+
+                        /* d. Serialize the JSON object safely */
+                        char *json_str = cJSON_PrintUnformatted(json_obj);
+                        if (json_str != NULL)
+                        {
+                            /* e. Pass the resulting JSON string to customer_app_update_from_json() */
+                            int update_res = customer_app_update_from_json(json_str);
+                            if (update_res != 0)
+                            {
+                                OSI_LOGE(TAG, "customer_app_update_from_json failed: %d", update_res);
+                            }
+
+                            /* Free serialized buffer */
+                            cJSON_free(json_str);
+                        }
+                        else
+                        {
+                            OSI_LOGE(TAG, "Failed to serialize update JSON");
+                        }
+                        cJSON_Delete(json_obj);
+                    }
+                    else
+                    {
+                        OSI_LOGE(TAG, "Failed to allocate cJSON object for update");
+                    }
+                }
+                else
+                {
+                    OSI_LOGE(TAG, "TMS response code 9999 but app_download_url is empty or invalid");
+                }
+
+                /* Stop registration task to avoid repeated updates or connecting while updating */
+                osiThreadExit();
+                return;
+            }
+            else if (tms_response_is_accepted(&tms_info))
             {
                 OSI_LOGI(TAG, "TMS REGISTRATION ACCEPTED");
                 break;
             }
-
-            if (res == 0)
+            else
             {
                 OSI_LOGE(TAG, "TMS registration not accepted; response_code=%s",
                          tms_info.response_code);
             }
-            else
-            {
-                OSI_LOGE(TAG, "TMS registration attempt failed; error=%d", res);
-            }
+        }
+        else
+        {
+            OSI_LOGE(TAG, "TMS registration attempt failed; error=%d", res);
         }
 
         if (TMS_MAX_RETRIES != 0U && attempts >= TMS_MAX_RETRIES)
@@ -479,12 +544,193 @@ void tms_registration_task(void *param)
             /* Trigger OTA only after validating URL and update policy. */
         }
 
-        if (tms_info.welcome_file_flag == 1 &&
-            strlen(tms_info.welcome_file_url) > 0)
+        /* 2. Check the Welcome Audio Flag (13th response index) */
+        OSI_LOGI(TAG, "Registration response status: code=%s (SUCCESS)", tms_info.response_code);
+        OSI_LOGI(TAG, "Welcome audio flag (13th response index): %d", tms_info.welcome_file_flag);
+
+        bool wel_requested = (tms_info.welcome_file_flag == 1);
+        bool wel_success = false;
+
+        if (wel_requested)
         {
-            OSI_LOGI(TAG, "Welcome audio URL provided: %s",
-                     tms_info.welcome_file_url);
-            /* Trigger audio download through your existing framework API. */
+            OSI_LOGI(TAG, "Welcome audio download requested (flag=1)");
+            bool url_present = (tms_info.welcome_file_url[0] != '\0');
+            OSI_LOGI(TAG, "Welcome audio URL present: %s", url_present ? "YES" : "NO");
+
+            if (!url_present)
+            {
+                OSI_LOGW(TAG, "Welcome audio flag is 1, but welcome_file_url is empty; skipping download");
+            }
+            else if (strncmp(tms_info.welcome_file_url, "http://", 7) != 0 &&
+                     strncmp(tms_info.welcome_file_url, "https://", 8) != 0)
+            {
+                OSI_LOGE(TAG, "Welcome audio URL invalid protocol: %s (must begin with http:// or https://); skipping download",
+                         tms_info.welcome_file_url);
+            }
+            else
+            {
+                /* 3. Extract and Parse the Welcome Audio URL (14th response index)
+                 * Format: <Base URL>/TMS/V1/SF/DWF/<partnerID>_<appID>_<welcomefilename>
+                 */
+                const char *last_slash = strrchr(tms_info.welcome_file_url, '/');
+                if (!last_slash || *(last_slash + 1) == '\0')
+                {
+                    OSI_LOGE(TAG, "Failed to parse filename from welcome audio URL: %s", tms_info.welcome_file_url);
+                }
+                else
+                {
+                    char raw_filename[128] = {0};
+                    const char *src_p = last_slash + 1;
+                    size_t raw_len = 0;
+
+                    /* Strip query parameters and URL delimiters */
+                    while (*src_p != '\0' && *src_p != '?' && *src_p != '#' && raw_len < (sizeof(raw_filename) - 5))
+                    {
+                        raw_filename[raw_len++] = *src_p++;
+                    }
+                    raw_filename[raw_len] = '\0';
+
+                    if (raw_len == 0)
+                    {
+                        OSI_LOGE(TAG, "Extracted empty welcome audio filename from URL: %s", tms_info.welcome_file_url);
+                    }
+                    else
+                    {
+                        /*
+                         * The URL follows the specification format:
+                         * <Base URL>/TMS/V1/SF/DWF/<partnerID>_<appID>_<welcomefilename>
+                         * Skip the first two prefix fields (<partnerID> and <appID>) to obtain
+                         * the full <welcomefilename> (e.g. "id_welc_template.mp3" or "welc.mp3").
+                         */
+                        const char *actual_name = raw_filename;
+                        const char *u1 = strchr(raw_filename, '_');
+                        if (u1 != NULL)
+                        {
+                            const char *u2 = strchr(u1 + 1, '_');
+                            if (u2 != NULL && *(u2 + 1) != '\0')
+                            {
+                                actual_name = u2 + 1; /* Skip <partnerID>_ and <appID>_ */
+                            }
+                            else if (*(u1 + 1) != '\0')
+                            {
+                                actual_name = u1 + 1;
+                            }
+                        }
+
+                        char welcome_filename[64] = {0};
+                        strncpy(welcome_filename, actual_name, sizeof(welcome_filename) - 5);
+                        welcome_filename[sizeof(welcome_filename) - 5] = '\0';
+                        size_t fn_len = strlen(welcome_filename);
+
+                        /* Ensure destination filename ends in .mp3 */
+                        if (fn_len < 4 || (strcmp(welcome_filename + fn_len - 4, ".mp3") != 0 &&
+                                           strcmp(welcome_filename + fn_len - 4, ".MP3") != 0))
+                        {
+                            OSI_LOGW(TAG, "Welcome filename '%s' lacks .mp3 extension; appending .mp3", welcome_filename);
+                            strncat(welcome_filename, ".mp3", sizeof(welcome_filename) - strlen(welcome_filename) - 1);
+                        }
+
+                        /* Retrieve the active audio file folder prefix */
+                        const char *active_folder = audio_resource_get_language_prefix();
+                        if (!active_folder || active_folder[0] == '\0')
+                        {
+#ifdef AUDIO_LANG_FEMALE_PATH
+                            active_folder = AUDIO_LANG_FEMALE_PATH;
+#else
+                            active_folder = "D:/FEMALE/";
+#endif
+                        }
+
+                        /* Construct destination path: <active_folder><welcome_filename> */
+                        char welcome_dst[128] = {0};
+                        size_t af_len = strlen(active_folder);
+                        if (af_len > 0 && active_folder[af_len - 1] == '/')
+                        {
+                            snprintf(welcome_dst, sizeof(welcome_dst), "%s%s", active_folder, welcome_filename);
+                        }
+                        else
+                        {
+                            snprintf(welcome_dst, sizeof(welcome_dst), "%s/%s", active_folder, welcome_filename);
+                        }
+
+                        /* 6. Runtime Behavior and Diagnostic Logging */
+                        OSI_LOGI(TAG, "Welcome Audio Details:");
+                        OSI_LOGI(TAG, "  Source URL:       %s", tms_info.welcome_file_url);
+                        OSI_LOGI(TAG, "  Active Folder:    %s", active_folder);
+                        OSI_LOGI(TAG, "  Extracted file:   %s", welcome_filename);
+                        OSI_LOGI(TAG, "  Destination path: %s", welcome_dst);
+
+                        /* 5. Check if valid welcome audio file already exists in persistent storage */
+                        int existing_size = (int)fs_size(welcome_dst);
+                        if (existing_size > 0)
+                        {
+                            OSI_LOGI(TAG, "Existing welcome audio file found: %s (%d bytes)",
+                                     welcome_dst, existing_size);
+                        }
+                        else
+                        {
+                            OSI_LOGI(TAG, "No existing welcome audio file found at %s", welcome_dst);
+                        }
+
+                        /* 4. Download Using the Existing MP3 Handler */
+                        const char *current_lang = customer_get_default_language();
+                        OSI_LOGI(TAG, "Starting welcome audio download (lang=%s)...",
+                                 current_lang ? current_lang : "EN");
+
+                        int download_ret = customer_audio_download_handle_single_mp3(
+                            tms_info.welcome_file_url,
+                            welcome_dst,
+                            current_lang
+                        );
+
+                        if (download_ret == 0)
+                        {
+                            OSI_LOGI(TAG, "Welcome audio download queued successfully (ret=0)");
+                            wel_success = true;
+                        }
+                        else
+                        {
+                            OSI_LOGE(TAG, "Welcome audio download failed to queue (ret=%d); preserving existing file",
+                                     download_ret);
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            OSI_LOGI(TAG, "Welcome audio flag is %d; skipping welcome audio download", tms_info.welcome_file_flag);
+        }
+
+        /* 3. Execute TMS Exception Audio/File Download Workflow (15th & 16th response fields) */
+        tms_exception_download_status_t exe_status = tms_exception_download_process(
+            tms_info.exception_file_flag,
+            tms_info.exception_file_url,
+            customer_get_default_language()
+        );
+
+        /* 4. Send Consolidated UPDATESBFLAG Acknowledgement (Section 10) */
+        if (wel_requested || tms_info.exception_file_flag == 1)
+        {
+            const char *wel_flag_str = tms_map_ack_status(wel_requested, wel_success);
+            const char *exe_flag_str = tms_map_ack_status(tms_info.exception_file_flag == 1,
+                                                          exe_status == TMS_EXCEPTION_DOWNLOAD_SUCCESS);
+
+            OSI_LOGI(TAG, "Dispatching consolidated UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s",
+                     wel_flag_str, exe_flag_str);
+
+            int ack_ret = tms_send_update_sb_flag_ack(
+                TMS_REGISTRATION_URL,
+                NULL, /* Automatically fetch serial_no */
+                tms_info.participant_id,
+                wel_flag_str,
+                exe_flag_str
+            );
+            if (ack_ret != 0) {
+                OSI_LOGE(TAG, "UPDATESBFLAG ACK dispatch failed: %d", ack_ret);
+            } else {
+                OSI_LOGI(TAG, "UPDATESBFLAG ACK dispatch succeeded");
+            }
         }
 
         /* Initialize MQTT handler using TMS info */

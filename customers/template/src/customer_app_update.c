@@ -54,10 +54,10 @@ int customer_app_update_start(const char *url, const char *type)
     return ret;
 }
 
-int customer_app_update_from_json(const cJSON *root)
+int customer_app_update_from_cjson(const cJSON *root)
 {
     if (!root) {
-        OSI_LOGE(TAG, "[OTA-UPDATE] JSON root is NULL");
+        OSI_LOGE(TAG, "[OTA-UPDATE] cJSON root is NULL");
         return -1;
     }
 
@@ -67,4 +67,22 @@ int customer_app_update_from_json(const cJSON *root)
     const char *type = (j_type && cJSON_IsString(j_type)) ? j_type->valuestring : NULL;
 
     return customer_app_update_start(url, type);
+}
+
+int customer_app_update_from_json(const char *json_str)
+{
+    if (!json_str || json_str[0] == '\0') {
+        OSI_LOGE(TAG, "[OTA-UPDATE] JSON string is empty or NULL");
+        return -1;
+    }
+
+    cJSON *root = cJSON_Parse(json_str);
+    if (!root) {
+        OSI_LOGE(TAG, "[OTA-UPDATE] Failed to parse JSON string: %s", json_str);
+        return -2;
+    }
+
+    int ret = customer_app_update_from_cjson(root);
+    cJSON_Delete(root);
+    return ret;
 }
