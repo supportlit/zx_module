@@ -1370,7 +1370,8 @@ void customer_init(void)
                                          : (init_bat >= 20)   ? 1
                                                               : 0;
     Paytm_LCD_Set_Power_Levl(init_p_levl);
-    appAllrefresh();
+    osiThreadSleep(5);       // Yield 25ms to let TM1726 settle after appLcdenable
+    appLcdShowTextHitachi(); // add by vipin: Show HITACHI on idle LCD screen at bootup
     // appLcdDisplayEnableALL(true);
     OSI_LOGI(TAG, "========================================");
     OSI_LOGI(TAG, "template Customer Initialization");

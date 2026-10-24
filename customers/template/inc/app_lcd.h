@@ -44,6 +44,7 @@ void Paytm_LCD_Set_PayTm_En(bool en);
 void Paytm_LCD_Set_Signal_Levl(int levl);
 void Paytm_LCD_Set_Volume_Levl(int levl);
 void appLcdShowTextLIT(void);
+void appLcdShowTextHitachi(void);
 
 #else /* CUSTOMER_ENABLE_LCD == 0: LCD Disabled / Normal Run Stubs (add by vipin) */
 
@@ -67,6 +68,7 @@ static inline void Paytm_LCD_Set_PayTm_En(bool en) { (void)en; }
 static inline void Paytm_LCD_Set_Signal_Levl(int levl) { (void)levl; }
 static inline void Paytm_LCD_Set_Volume_Levl(int levl) { (void)levl; }
 static inline void appLcdShowTextLIT(void) {}
+static inline void appLcdShowTextHitachi(void) {}
 
 #endif /* CUSTOMER_ENABLE_LCD */
 

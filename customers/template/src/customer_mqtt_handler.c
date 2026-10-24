@@ -5,6 +5,7 @@
 #include "customer_change_language_ack.h"
 #include "customer_payment_handler.h"
 #include "customer_status_report.h"
+#include "customer_app_update.h"
 #include "framework_audio.h"
 #include "framework_device_config.h"
 #include "framework_http.h"
@@ -868,33 +869,13 @@ static void template_handle_server_message(const char *topic,
       OSI_LOGE(TAG, "[SOUND-UPDATE] request rejected");
     }
   } else if (strstr(topic, "/ota-update")) {
-    // {"url":"..."}
+    // {"url":"...", "type":"..."}
     const cJSON *j_url = cJSON_GetObjectItem(root, "url");
     const cJSON *j_type = cJSON_GetObjectItem(root, "type");
-    const char *url = j_url && cJSON_IsString(j_url) ? j_url->valuestring : "";
-    OSI_LOGI(TAG, "[OTA-UPDATE]type:%s url=%s",
-             j_type ? j_type->valuestring : "(none)", url);
-    if (j_type && cJSON_IsString(j_type)) {
-      const char *type = j_type->valuestring;
-      OSI_LOGI(TAG, "[OTA-UPDATE] url=%s type=%s", url, type);
-      if (strcmp(type, "wifi-firmware") == 0) {
-        framework_http_download_file(url, "D:/wifi_firmware.bin",
-                                     HTTP_DOWNLOAD_TYPE_WIFI_FW_OTA);
-        audio_resource_play_combo_async_mid_priority("", "upgrade-ing.mp3",
-                                                     NULL, 1);
-        cJSON_Delete(root);
-        return;
-      }
-    }
-    // add by vipin: support both zip and raw bin download for App OTA
-    const char *ext = strrchr(url, '.');
-    bool is_zip_url = (ext && (strncasecmp(ext, ".zip", 4) == 0));
-    const char *save_path = is_zip_url ? "D:/ota_update.zip" : "D:/ota_update.bin";
+    const char *url = (j_url && cJSON_IsString(j_url)) ? j_url->valuestring : "";
+    const char *type = (j_type && cJSON_IsString(j_type)) ? j_type->valuestring : NULL;
 
-    framework_http_download_file(url, save_path,
-                                 HTTP_DOWNLOAD_TYPE_FW_OTA);
-    audio_resource_play_combo_async_mid_priority("", "upgrade-ing.mp3", NULL,
-                                                 1);
+    customer_app_update_start(url, type);
   } else if (strstr(topic, "/restart")) {
     // {"restart":"true"}
     const cJSON *j_restart = cJSON_GetObjectItem(root, "restart");

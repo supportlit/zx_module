@@ -5,6 +5,7 @@
 #include "at_api.h"
 #include "audio_api.h"
 #include "customer_config.h"
+#include "customer_payment_handler.h"
 #include "drv_camera.h"
 #include "drv_def.h"
 #include "drv_i2c.h"
@@ -1352,6 +1353,95 @@ void appdatarefresh(int addr, int len) {
           len); // 0xc0 为LCD SEG0的起始位置,写入数据
 #endif
   osiMutexUnlock(lcdFlagMux);
+}
+
+// add by vipin: Show "HITACHI" on idle LCD screen and clear transaction icons
+void appLcdShowTextHitachi(void) {
+  if (lcdFlagMux == NULL) {
+    return;
+  }
+
+  static const short recv_data_map[8][7] = {
+      // "A"          "B"              "C"             "D"             "E" "F" "G"
+      {COM_ROW(4, 7), COM_ROW(0, 7), COM_ROW(2, 7), COM_ROW(7, 7),
+       COM_ROW(6, 7), COM_ROW(5, 7), COM_ROW(1, 7)},
+      {COM_ROW(4, 6), COM_ROW(0, 6), COM_ROW(2, 6), COM_ROW(7, 6),
+       COM_ROW(6, 6), COM_ROW(5, 6), COM_ROW(1, 6)},
+      {COM_ROW(4, 5), COM_ROW(0, 5), COM_ROW(2, 5), COM_ROW(7, 5),
+       COM_ROW(6, 5), COM_ROW(5, 5), COM_ROW(1, 5)},
+      {COM_ROW(4, 4), COM_ROW(0, 4), COM_ROW(2, 4), COM_ROW(7, 4),
+       COM_ROW(6, 4), COM_ROW(5, 4), COM_ROW(1, 4)},
+      {COM_ROW(4, 3), COM_ROW(0, 3), COM_ROW(2, 3), COM_ROW(7, 3),
+       COM_ROW(6, 3), COM_ROW(5, 3), COM_ROW(1, 3)},
+      {COM_ROW(4, 2), COM_ROW(0, 2), COM_ROW(2, 2), COM_ROW(7, 2),
+       COM_ROW(6, 2), COM_ROW(5, 2), COM_ROW(1, 2)},
+      {COM_ROW(4, 1), COM_ROW(0, 1), COM_ROW(2, 1), COM_ROW(7, 1),
+       COM_ROW(6, 1), COM_ROW(5, 1), COM_ROW(1, 1)},
+      {COM_ROW(4, 0), COM_ROW(0, 0), COM_ROW(2, 0), COM_ROW(7, 0),
+       COM_ROW(6, 0), COM_ROW(5, 0), COM_ROW(1, 0)},
+  };
+
+  /* Patterns for "HITACHI" across all 8 LCD digits:
+   * Digit 0: 'H' = 0x76 (B+C+E+F+G)
+   * Digit 1: 'I' = 0x06 (B+C)
+   * Digit 2: 'T' left half  = 0x07 (A+B+C: top bar + right stem: ───┐)
+   * Digit 3: 'T' right half = 0x31 (A+E+F: top bar + left stem:  ┌───)
+   * Digit 4: 'A' = 0x77 (A+B+C+E+F+G)
+   * Digit 5: 'C' = 0x39 (A+D+E+F)
+   * Digit 6: 'H' = 0x76 (B+C+E+F+G)
+   * Digit 7: 'I' = 0x06 (B+C)
+   */
+  static const uint8_t hitachi_patterns[8] = {
+      0x76, // 'H' (digit 0)
+      0x06, // 'I' (digit 1)
+      0x07, // 'T' left half  (───┐) (digit 2)
+      0x31, // 'T' right half (┌───) (digit 3)
+      0x77, // 'A' (digit 4)
+      0x39, // 'C' (digit 5)
+      0x76, // 'H' (digit 6)
+      0x06  // 'I' (digit 7)
+  };
+
+  // Show day count and COUNT icon beside HITACHI if transactions exist
+  uint32_t count = customer_payment_get_total_count();
+  if (count > 0) {
+    Paytm_LCD_Set_Count_En(true);
+    prvLcdReceiveAmountSet(count);
+  } else {
+    Paytm_LCD_Set_Count_En(false);
+    prvLcdReceiveAmountClr();
+  }
+
+  osiMutexLock(lcdFlagMux);
+
+  // Clear Hook (row 13 bit 2) and Paytm (row 13 bit 3)
+  disp_buf[13] &= ~((0x01 << 2) | (0x01 << 3));
+  // Clear RS (row 10 bit 0)
+  disp_buf[10] &= ~(0x01 << 0);
+
+  // Clear all decimal points (COM 3 on rows 0-7)
+  for (int r = 0; r < 8; r++) {
+    disp_buf[r] &= ~(0x01 << 3);
+  }
+
+  // Draw "HITACHI" on all 8 digits (T spans digits 2 and 3: ───┐ ┌───)
+  for (int i = 0; i < 8; i++) {
+    uint8_t dig = hitachi_patterns[i];
+    for (int j = 0; j < 7; j++) {
+      int row_idx = ROW(recv_data_map[i][j]);
+      int com_idx = COM(recv_data_map[i][j]);
+      if (dig & 0x01) {
+        disp_buf[row_idx] |= (0x01 << com_idx);
+      } else {
+        disp_buf[row_idx] &= ((0x01 << com_idx) ^ 0xff);
+      }
+      dig >>= 1;
+    }
+  }
+
+  osiMutexUnlock(lcdFlagMux);
+
+  appAllrefresh();
 }
 
 #endif /* CUSTOMER_ENABLE_LCD */

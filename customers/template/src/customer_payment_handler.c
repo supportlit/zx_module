@@ -505,6 +505,36 @@ static uint32_t s_last_txn_count = 0;  // add by vipin: transaction count of las
 #define CUSTOMER_LCD_SHOW_TXN_COUNT 1 // add by vipin: 1 = Show Total Txn Count on LCD side display, 0 = Hide side count
 #endif
 
+#ifndef CUSTOMER_LCD_IDLE_TIMEOUT_MS
+#define CUSTOMER_LCD_IDLE_TIMEOUT_MS 10000 // add by vipin: 10 seconds amount display before idle screen
+#endif
+
+#if defined(CUSTOMER_ENABLE_LCD) && (CUSTOMER_ENABLE_LCD == 1)
+static osiTimer_t *s_lcd_idle_timer = NULL;
+static osiWork_t *s_lcd_idle_work = NULL;
+
+static void prv_lcd_idle_work_callback(void *param)
+{
+    (void)param;
+    FRAMEWORK_LOG("LCD 10s idle timeout reached, reverting to HITACHI screen");
+    appLcdShowTextHitachi();
+}
+
+static void prv_lcd_idle_timer_callback(void *param)
+{
+    (void)param;
+    if (s_lcd_idle_timer != NULL) {
+        osiTimerStop(s_lcd_idle_timer);
+    }
+    if (s_lcd_idle_work == NULL) {
+        s_lcd_idle_work = osiWorkCreate(prv_lcd_idle_work_callback, NULL, NULL);
+    }
+    if (s_lcd_idle_work != NULL) {
+        osiWorkEnqueue(s_lcd_idle_work, osiSysWorkQueueLowPriority());
+    }
+}
+#endif
+
 static char s_pending_txn_id[64] = {0};
 static char s_pending_amount_str[16] = {0};
 static char s_pending_language[16] = {0};
@@ -637,6 +667,15 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
     lcd.lcd_amount = 0;       // add by vipin: clear side digits
 #endif
     appLcdset(lcd);
+
+    // add by vipin: Show amount for 10 seconds then revert to idle "HITACHI" screen
+    if (s_lcd_idle_timer == NULL) {
+        s_lcd_idle_timer = osiTimerCreate(prv_lcd_idle_timer_callback, NULL);
+    }
+    if (s_lcd_idle_timer != NULL) {
+        osiTimerStop(s_lcd_idle_timer);
+        osiTimerStart(s_lcd_idle_timer, CUSTOMER_LCD_IDLE_TIMEOUT_MS);
+    }
 #else
     prvLcdSecCodeSet((long)(params->rupees > 0 ? params->rupees : params->amount));
 #endif
