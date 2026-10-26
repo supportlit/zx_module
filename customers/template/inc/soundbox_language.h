@@ -32,6 +32,18 @@ typedef enum
 } soundbox_language_t;
 
 /**
+ * @brief Default soundbox audio language for fresh boot initialization
+ */
+#define SOUNDBOX_DEFAULT_LANGUAGE LANGUAGE_ENGLISH
+
+/**
+ * @brief Check if language.txt exists during boot; create it if missing with default language
+ *
+ * @return 0 on success (file exists or created successfully), negative error code on failure
+ */
+int soundbox_ensure_language_file_exists(void);
+
+/**
  * @brief Load language setting from TEMPLATE_LANGUAGE_FILE_PATH (D:/language.txt)
  *
  * @param language Output pointer to receive the validated language enum (or fallback)

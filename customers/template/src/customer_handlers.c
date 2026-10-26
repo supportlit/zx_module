@@ -1042,7 +1042,7 @@ int customer_msg_handler(framework_msg_t *msg)
 
         /* Launch TMS registration in a dedicated thread with 12KB stack for HTTPS / TLS */
         OSI_LOGI(TAG, "Launching TMS Registration background task...");
-        osiThread_t *reg_th = osiThreadCreate("tms_reg", tms_registration_task, NULL, 120, 12 * 1024);
+        osiThread_t *reg_th = osiThreadCreate("tms_reg", tms_registration_task, NULL, 120, 16 * 1024);
         if (!reg_th)
         {
             OSI_LOGE(TAG, "Failed to create TMS registration thread");

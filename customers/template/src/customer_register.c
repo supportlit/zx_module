@@ -55,7 +55,7 @@ static const char *s_hardcoded_json_req =
 static const char *s_hardcoded_pipe_resp =
     "0000|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
     "b15eeee6-b841-44af-9448-2c58d2cadb11|HPRCEKSPFI|"
-    "0|0|0| |0| |1|0|0|0|0|";
+    "0|0|0| |0||1|0|0|0|0|";
 
 static void trim_whitespace(char *str)
 {
@@ -721,35 +721,35 @@ void tms_registration_task(void *param)
         }
 
         /* 3. Execute TMS Exception Audio/File Download Workflow (15th & 16th response fields) */
-        // tms_exception_download_status_t exe_status = tms_exception_download_process(
-        //     tms_info.exception_file_flag,
-        //     tms_info.exception_file_url,
-        //     customer_get_default_language()
-        // );
+        tms_exception_download_status_t exe_status = tms_exception_download_process(
+            tms_info.exception_file_flag,
+            tms_info.exception_file_url,
+            customer_get_default_language()
+        );
 
         /* 4. Send Consolidated UPDATESBFLAG Acknowledgement (Section 10) */
-        // if (wel_requested || tms_info.exception_file_flag == 1)
-        // {
-        //     const char *wel_flag_str = tms_map_ack_status(wel_requested, wel_success);
-        //     const char *exe_flag_str = tms_map_ack_status(tms_info.exception_file_flag == 1,
-        //                                                   exe_status == TMS_EXCEPTION_DOWNLOAD_SUCCESS);
+        if (wel_requested || tms_info.exception_file_flag == 1)
+        {
+            const char *wel_flag_str = tms_map_ack_status(wel_requested, wel_success);
+            const char *exe_flag_str = tms_map_ack_status(tms_info.exception_file_flag == 1,
+                                                          exe_status == TMS_EXCEPTION_DOWNLOAD_SUCCESS);
 
-        //     OSI_LOGI(TAG, "Dispatching consolidated UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s",
-        //              wel_flag_str, exe_flag_str);
+            OSI_LOGI(TAG, "Dispatching consolidated UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s",
+                     wel_flag_str, exe_flag_str);
 
-        //     int ack_ret = tms_send_update_sb_flag_ack(
-        //         TMS_REGISTRATION_URL,
-        //         NULL, /* Automatically fetch serial_no */
-        //         tms_info.participant_id,
-        //         wel_flag_str,
-        //         exe_flag_str
-        //     );
-        //     if (ack_ret != 0) {
-        //         OSI_LOGE(TAG, "UPDATESBFLAG ACK dispatch failed: %d", ack_ret);
-        //     } else {
-        //         OSI_LOGI(TAG, "UPDATESBFLAG ACK dispatch succeeded");
-        //     }
-        //}
+            int ack_ret = tms_send_update_sb_flag_ack(
+                TMS_REGISTRATION_URL,
+                NULL, /* Automatically fetch serial_no */
+                tms_info.participant_id,
+                wel_flag_str,
+                exe_flag_str
+            );
+            if (ack_ret != 0) {
+                OSI_LOGE(TAG, "UPDATESBFLAG ACK dispatch failed: %d", ack_ret);
+            } else {
+                OSI_LOGI(TAG, "UPDATESBFLAG ACK dispatch succeeded");
+            }
+        }
 
         /* Initialize MQTT handler using TMS info */
         customer_mqtt_network_ready();

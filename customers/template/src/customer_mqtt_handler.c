@@ -24,7 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include "TmsExceptionDownload.h"
 #define TAG "TEMPLATE_MQTT"
 
 #define TEMPLATE_SOUND_ZIP_PATH "D:/template_sound_update.zip"
@@ -593,214 +593,118 @@ static int template_load_certificates_from_files(void)
   return 0;
 }
 
+static int prv_split_pipe_tokens(char *buf, char *tokens[], int max_tokens)
+{
+  int count = 0;
+  char *curr = buf;
+  while (curr && count < max_tokens)
+  {
+    tokens[count++] = curr;
+    char *sep = strchr(curr, '|');
+    if (sep)
+    {
+      *sep = '\0';
+      curr = sep + 1;
+    }
+    else
+    {
+      break;
+    }
+  }
+  return count;
+}
+
 static void template_handle_server_message(const char *topic,
                                            const char *payload,
                                            uint32_t payload_len)
 {
-  char buf[512];
-  if (payload_len >= sizeof(buf))
-    payload_len = sizeof(buf) - 1;
-  memcpy(buf, payload, payload_len);
-  buf[payload_len] = 0;
-
-  // Handle pipe-delimited payment messages:
-  // Format: Language|Mode of payment|Amount|...|Transaction Id
-  // e.g. "EN|UPI|1590.00| | |415857764147"
-  if (strchr(buf, '|'))
+  /* 1. Print the received MQTT topic before processing the payload. */
+  if (!topic || !payload || payload_len == 0)
   {
-    char *tokens[10] = {0};
-    int token_count = 0;
-    char temp_buf[512];
-    strncpy(temp_buf, buf, sizeof(temp_buf) - 1);
-    temp_buf[sizeof(temp_buf) - 1] = '\0';
-
-    char *p = temp_buf;
-    while (p && token_count < 10)
-    {
-      tokens[token_count++] = p;
-      char *next = strchr(p, '|');
-      if (next)
-      {
-        *next = '\0';
-        p = next + 1;
-      }
-      else
-      {
-        break;
-      }
-    }
-
-    for (int i = 0; i < token_count; i++)
-    {
-      tokens[i] = prv_str_trim(tokens[i]);
-    }
-
-    if (token_count >= 3)
-    {
-      // const char *lang_str = (token_count > 0 && tokens[0][0] != '\0') ? tokens[0] : s_default_language;
-      const char *lang_str = customer_get_default_language();
-      const char *mode = (token_count > 1) ? tokens[1] : "";
-      const char *amount_str = (token_count > 2) ? tokens[2] : "0.00";
-
-      // Find transaction id from remaining tokens (e.g. token[5] or token[3])
-      const char *transaction_id = "";
-      for (int i = token_count - 1; i >= 3; i--)
-      {
-        if (tokens[i][0] != '\0')
-        {
-          transaction_id = tokens[i];
-          break;
-        }
-      }
-
-      double amount_val = atof(amount_str);
-      uint64_t rupees = (uint64_t)amount_val;
-      uint32_t paise = (uint32_t)((amount_val - (double)rupees) * 100.0 + 0.5);
-      if (paise >= 100)
-      {
-        rupees += 1;
-        paise = 0;
-      }
-
-      OSI_LOGI(TAG,
-               "[PIPE-PAYMENT] lang=%s, mode=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), txn_id=%s",
-               lang_str, mode, amount_str, amount_val,
-               (unsigned long long)rupees, (unsigned long)paise, transaction_id);
-
-      payment_broadcast_params_t params = {0};
-      params.amount = rupees;
-      params.rupees = rupees;
-      params.paise = paise;
-      params.total_amount = amount_val;
-      strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
-      strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
-      strncpy(params.language, lang_str, sizeof(params.language) - 1);
-
-      int ret = customer_payment_broadcast(&params);
-      if (ret != 0)
-      {
-        payment_callback_t callback = {0};
-        strncpy(callback.serial_number, sn, sizeof(callback.serial_number) - 1);
-        strncpy(callback.status, "0", sizeof(callback.status) - 1);
-        strncpy(callback.transaction_id, transaction_id, sizeof(callback.transaction_id) - 1);
-        strncpy(callback.amount, amount_str, sizeof(callback.amount) - 1);
-        strncpy(callback.language, lang_str, sizeof(callback.language) - 1);
-        strncpy(callback.reason, "Broadcast failed", sizeof(callback.reason) - 1);
-        osiTime_t now = {0};
-        osiGetTime(&now);
-        snprintf(callback.sound_played_datetime, sizeof(callback.sound_played_datetime),
-                 "%04d-%02d-%02d %02d:%02d:%02d",
-                 now.tm_year, now.tm_mon, now.tm_mday,
-                 now.tm_hour, now.tm_min, now.tm_sec);
-        customer_status_report_payment(&callback);
-      }
-      return;
-    }
-  }
-
-  cJSON *root = cJSON_Parse(buf);
-  if (!root)
-  {
-    OSI_LOGI(TAG, "[JSON] Parse error: %s", buf);
+    OSI_LOGE(TAG, "[MQTT] Invalid message: topic or payload is NULL/empty");
     return;
   }
+  OSI_LOGI(TAG, "[MQTT] Received topic: %s", topic);
 
-  if (strstr(topic, "/payment") || strstr(topic, "pebble") ||
-      strstr(topic, "pebble_screen") || strstr(topic, "pocket") || strstr(topic, "neo"))
+  /* 2. Safely copy and validate incoming payload in a bounded buffer. */
+  char buf[512];
+  if (payload_len >= sizeof(buf))
   {
-    // Support both Hitachi TMS ("TxnId", "Amount", "Language") and legacy ("transaction_id", "amount", "language")
-    const cJSON *j_id = cJSON_GetObjectItem(root, "transaction_id");
-    if (!j_id)
-    {
-      j_id = cJSON_GetObjectItem(root, "TxnId");
-    }
-    const cJSON *j_amount = cJSON_GetObjectItem(root, "amount");
-    if (!j_amount)
-    {
-      j_amount = cJSON_GetObjectItem(root, "Amount");
-    }
-    const cJSON *j_status = cJSON_GetObjectItem(root, "status");
-    const cJSON *j_lang = cJSON_GetObjectItem(root, "language");
-    if (!j_lang)
-    {
-      j_lang = cJSON_GetObjectItem(root, "Language");
-    }
-    if (!j_lang)
-    {
-      j_lang = cJSON_GetObjectItem(root, "lang");
-    }
-    if (!j_lang)
-    {
-      j_lang = cJSON_GetObjectItem(root, "Lang");
-    }
-    const char *transaction_id =
-        j_id && cJSON_IsString(j_id) ? j_id->valuestring : "";
-
-    char amount_str[16] = {0};
-    double amount_val = 0.0;
-    if (j_amount)
-    {
-      if (cJSON_IsNumber(j_amount))
-      {
-        amount_val = j_amount->valuedouble;
-        snprintf(amount_str, sizeof(amount_str), "%.2f", amount_val);
-      }
-      else if (cJSON_IsString(j_amount) && j_amount->valuestring)
-      {
-        strncpy(amount_str, j_amount->valuestring, sizeof(amount_str) - 1);
-        amount_val = atof(amount_str);
-      }
-    }
-    uint64_t rupees = (uint64_t)amount_val;
-    uint32_t paise = (uint32_t)((amount_val - (double)rupees) * 100.0 + 0.5);
-    if (paise >= 100)
-    {
-      rupees += 1;
-      paise = 0;
-    }
-
-    const char *lang_str = (j_lang && cJSON_IsString(j_lang)) ? j_lang->valuestring : NULL;
-    if (!lang_str || lang_str[0] == '\0')
-    {
-      lang_str = customer_get_default_language();
-    }
-
-    const char *status =
-        j_status && cJSON_IsString(j_status) ? j_status->valuestring : "";
-    OSI_LOGI(TAG,
-             "[PAYMENT] id=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), lang=%s, status=%s",
-             transaction_id, amount_str, amount_val, (unsigned long long)rupees,
-             (unsigned long)paise, lang_str, status); // add by vipin
-    payment_broadcast_params_t params = {0};
-    params.amount = rupees;           // add by vipin: legacy integer field compatibility
-    params.rupees = rupees;           // add by vipin: integer rupee portion
-    params.paise = paise;             // add by vipin: integer paise portion (0-99)
-    params.total_amount = amount_val; // add by vipin: full amount float/double
-    strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
-    strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
-    strncpy(params.language, lang_str, sizeof(params.language) - 1);
-    int ret = customer_payment_broadcast(&params);
-    if (ret != 0)
-    {
-      payment_callback_t callback = {0};
-      strncpy(callback.serial_number, sn, sizeof(callback.serial_number) - 1);
-      strncpy(callback.status, "0", sizeof(callback.status) - 1); // 0 = Failure
-      strncpy(callback.transaction_id, transaction_id, sizeof(callback.transaction_id) - 1);
-      strncpy(callback.amount, amount_str, sizeof(callback.amount) - 1);
-      strncpy(callback.language, lang_str, sizeof(callback.language) - 1);
-      strncpy(callback.reason, "Broadcast failed", sizeof(callback.reason) - 1);
-      osiTime_t now = {0};
-      osiGetTime(&now);
-      snprintf(callback.sound_played_datetime, sizeof(callback.sound_played_datetime), "%04d-%02d-%02d %02d:%02d:%02d",
-               now.tm_year, now.tm_mon, now.tm_mday,
-               now.tm_hour, now.tm_min, now.tm_sec);
-      customer_status_report_payment(&callback);
-    }
-    // Note: On success (ret == 0), transaction ACK is sent automatically
-    // when audio finishes playing via prv_payment_audio_playback_callback
+    payload_len = sizeof(buf) - 1;
   }
-  else if (strstr(topic, "/sound-update"))
+  memcpy(buf, payload, payload_len);
+  buf[payload_len] = '\0';
+
+  /* 3. Identify the operation from the MQTT topic and dispatch. */
+
+  /* =========================================================================
+   * OPERATION 1: sound-update
+   * Input format: url|language_code|destination_folder [|md5|req_id|uuid|dev_id]
+   * ========================================================================= */
+  if (strstr(topic, "sound-update") || strstr(buf, "sound-update|") == buf || strncmp(buf, "sound-update |", 14) == 0)
   {
+    cJSON *root = NULL;
+    if (buf[0] == '{')
+    {
+      root = cJSON_Parse(buf);
+    }
+    else
+    {
+      char *tokens[10] = {0};
+      int count = prv_split_pipe_tokens(buf, tokens, 10);
+      for (int i = 0; i < count; i++)
+      {
+        tokens[i] = prv_str_trim(tokens[i]);
+      }
+      root = cJSON_CreateObject();
+      if (root)
+      {
+        int t_idx = 0;
+        if (count > 1 && (strcasecmp(tokens[0], "sound-update") == 0 || strcasecmp(tokens[0], "sound_update") == 0))
+        {
+          t_idx = 1;
+        }
+        if (count > t_idx && tokens[t_idx][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "url", tokens[t_idx]);
+        }
+        if (count > t_idx + 1 && tokens[t_idx + 1][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "language", tokens[t_idx + 1]);
+        }
+        if (count > t_idx + 2 && tokens[t_idx + 2][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "dst", tokens[t_idx + 2]);
+        }
+        if (count > t_idx + 3 && tokens[t_idx + 3][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "MD5", tokens[t_idx + 3]);
+        }
+        if (count > t_idx + 4 && tokens[t_idx + 4][0] != '\0')
+        {
+          double req_id = strtod(tokens[t_idx + 4], NULL);
+          if (req_id > 0)
+          {
+            cJSON_AddNumberToObject(root, "request_id", req_id);
+          }
+        }
+        if (count > t_idx + 5 && tokens[t_idx + 5][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "uuid", tokens[t_idx + 5]);
+        }
+        if (count > t_idx + 6 && tokens[t_idx + 6][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "deviceId", tokens[t_idx + 6]);
+        }
+      }
+    }
+
+    if (!root)
+    {
+      OSI_LOGE(TAG, "[SOUND-UPDATE] Failed to create or parse JSON object");
+      return;
+    }
+
     const cJSON *j_url = cJSON_GetObjectItemCaseSensitive(root, "url");
     const cJSON *j_md5 = cJSON_GetObjectItemCaseSensitive(root, "MD5");
     const cJSON *j_dst = cJSON_GetObjectItem(root, "dst");
@@ -847,48 +751,264 @@ static void template_handle_server_message(const char *topic,
     const char *uuid_str = (j_uuid && cJSON_IsString(j_uuid)) ? j_uuid->valuestring : NULL;
     const char *dev_id_str = (j_dev_id && cJSON_IsString(j_dev_id)) ? j_dev_id->valuestring : NULL;
 
-    const char *url =
-        (j_url && cJSON_IsString(j_url)) ? j_url->valuestring : NULL;
-    const char *md5 =
-        (j_md5 && cJSON_IsString(j_md5)) ? j_md5->valuestring : NULL;
-    const char *dst =
-        (j_dst && cJSON_IsString(j_dst)) ? j_dst->valuestring : NULL;
-    const char *req_lang =
-        (j_lang && cJSON_IsString(j_lang)) ? j_lang->valuestring : NULL;
+    const char *url = (j_url && cJSON_IsString(j_url)) ? j_url->valuestring : NULL;
+    const char *md5 = (j_md5 && cJSON_IsString(j_md5)) ? j_md5->valuestring : NULL;
+    const char *dst = (j_dst && cJSON_IsString(j_dst)) ? j_dst->valuestring : NULL;
+    const char *req_lang = (j_lang && cJSON_IsString(j_lang)) ? j_lang->valuestring : NULL;
 
-    OSI_LOGI(TAG, "[SOUND-UPDATE] url=%s md5=%s dst=%s req_lang=%s req_id=%.0f uuid=%s dev_id=%s",
-             url ? url : "(null)", md5 ? md5 : "(none)", dst ? dst : "(default: D:/FEMALE/)",
-             req_lang ? req_lang : "(none)", req_id, uuid_str ? uuid_str : "(none)", dev_id_str ? dev_id_str : "(none)");
-    if (template_start_sound_update(url, md5, dst, req_lang, true, req_id, uuid_str, dev_id_str) != 0)
+    if (!url || url[0] == '\0')
     {
-      OSI_LOGE(TAG, "[SOUND-UPDATE] request rejected");
+      OSI_LOGE(TAG, "[SOUND-UPDATE] Missing or invalid URL");
     }
+    else
+    {
+      OSI_LOGI(TAG, "[SOUND-UPDATE] url=%s md5=%s dst=%s req_lang=%s req_id=%.0f uuid=%s dev_id=%s",
+               url, md5 ? md5 : "(none)", dst ? dst : "(default: D:/FEMALE/)",
+               req_lang ? req_lang : "(none)", req_id, uuid_str ? uuid_str : "(none)", dev_id_str ? dev_id_str : "(none)");
+      if (template_start_sound_update(
+              url,
+              md5,
+              dst,
+              req_lang,
+              true,
+              req_id,
+              uuid_str,
+              dev_id_str) != 0)
+      {
+        OSI_LOGE(TAG, "[SOUND-UPDATE] request rejected");
+      }
+      else
+      {
+        OSI_LOGI(TAG, "[SOUND-UPDATE] sound update initiated successfully");
+      }
+    }
+    cJSON_Delete(root);
   }
-  else if (strstr(topic, "/ota-update"))
+  /* =========================================================================
+   * OPERATION 2: audio-download
+   * Input format: url|destination_file [|language_code]
+   * ========================================================================= */
+  else if (strstr(topic, "audio-download") || strstr(buf, "audio-download|") == buf || strncmp(buf, "audio-download |", 16) == 0)
   {
-    // {"url":"...", "type":"..."}
+    cJSON *root = NULL;
+    if (buf[0] == '{')
+    {
+      root = cJSON_Parse(buf);
+    }
+    else
+    {
+      char *tokens[5] = {0};
+      int count = prv_split_pipe_tokens(buf, tokens, 5);
+      for (int i = 0; i < count; i++)
+      {
+        tokens[i] = prv_str_trim(tokens[i]);
+      }
+      root = cJSON_CreateObject();
+      if (root)
+      {
+        int t_idx = 0;
+        if (count > 1 && (strcasecmp(tokens[0], "audio-download") == 0 || strcasecmp(tokens[0], "audio_download") == 0))
+        {
+          t_idx = 1;
+        }
+        if (count > t_idx && tokens[t_idx][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "url", tokens[t_idx]);
+        }
+        if (count > t_idx + 1 && tokens[t_idx + 1][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "dst", tokens[t_idx + 1]);
+        }
+        if (count > t_idx + 2 && tokens[t_idx + 2][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "language", tokens[t_idx + 2]);
+        }
+        cJSON_AddBoolToObject(root, "download", true);
+      }
+    }
+
+    if (!root)
+    {
+      OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Failed to create or parse JSON object");
+      return;
+    }
+
+    OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Dispatching audio download request to handler");
+    int ad_ret = customer_audio_download_from_json(root);
+    if (ad_ret != 0)
+    {
+      OSI_LOGE(TAG, "[AUDIO-DOWNLOAD] Audio download handling failed: %d", ad_ret);
+    }
+    else
+    {
+      OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Audio download handling succeeded");
+    }
+    cJSON_Delete(root);
+  }
+  /* =========================================================================
+   * OPERATION 3: restart
+   * Input format: true (or true|...)
+   * ========================================================================= */
+  else if (strstr(topic, "restart") || strstr(buf, "restart|") == buf || strncmp(buf, "restart |", 9) == 0)
+  {
+    cJSON *root = NULL;
+    if (buf[0] == '{')
+    {
+      root = cJSON_Parse(buf);
+    }
+    else
+    {
+      char *tokens[3] = {0};
+      int count = prv_split_pipe_tokens(buf, tokens, 3);
+      for (int i = 0; i < count; i++)
+      {
+        tokens[i] = prv_str_trim(tokens[i]);
+      }
+      root = cJSON_CreateObject();
+      if (root)
+      {
+        int t_idx = 0;
+        if (count > 1 && strcasecmp(tokens[0], "restart") == 0)
+        {
+          t_idx = 1;
+        }
+        const char *restart_val = (count > t_idx) ? tokens[t_idx] : "";
+        cJSON_AddStringToObject(root, "restart", restart_val);
+      }
+    }
+
+    if (!root)
+    {
+      OSI_LOGE(TAG, "[RESTART] Failed to create or parse JSON object");
+      return;
+    }
+
+    const cJSON *j_restart = cJSON_GetObjectItem(root, "restart");
+    const char *restart = (j_restart && cJSON_IsString(j_restart)) ? j_restart->valuestring : "";
+    OSI_LOGI(TAG, "[RESTART] restart=%s", restart);
+    if (strcmp(restart, "true") == 0)
+    {
+      OSI_LOGI(TAG, "[RESTART] Executing device reset");
+      customer_dux_publish_device_power(0);
+      osiSysReset();
+    }
+    else
+    {
+      OSI_LOGW(TAG, "[RESTART] Ignored: restart field missing or not 'true'");
+    }
+    cJSON_Delete(root);
+  }
+  /* =========================================================================
+   * OPERATION 4: ota-update
+   * Input format: url [|type]
+   * ========================================================================= */
+  else if (strstr(topic, "ota-update") || strstr(buf, "ota-update|") == buf || strncmp(buf, "ota-update |", 12) == 0)
+  {
+    cJSON *root = NULL;
+    if (buf[0] == '{')
+    {
+      root = cJSON_Parse(buf);
+    }
+    else
+    {
+      char *tokens[3] = {0};
+      int count = prv_split_pipe_tokens(buf, tokens, 3);
+      for (int i = 0; i < count; i++)
+      {
+        tokens[i] = prv_str_trim(tokens[i]);
+      }
+      root = cJSON_CreateObject();
+      if (root)
+      {
+        int t_idx = 0;
+        if (count > 1 && (strcasecmp(tokens[0], "ota-update") == 0 || strcasecmp(tokens[0], "ota_update") == 0))
+        {
+          t_idx = 1;
+        }
+        if (count > t_idx && tokens[t_idx][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "url", tokens[t_idx]);
+        }
+        if (count > t_idx + 1 && tokens[t_idx + 1][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "type", tokens[t_idx + 1]);
+        }
+      }
+    }
+
+    if (!root)
+    {
+      OSI_LOGE(TAG, "[OTA-UPDATE] Failed to create or parse JSON object");
+      return;
+    }
+
     const cJSON *j_url = cJSON_GetObjectItem(root, "url");
     const cJSON *j_type = cJSON_GetObjectItem(root, "type");
     const char *url = (j_url && cJSON_IsString(j_url)) ? j_url->valuestring : "";
     const char *type = (j_type && cJSON_IsString(j_type)) ? j_type->valuestring : NULL;
 
-    customer_app_update_start(url, type);
-  }
-  else if (strstr(topic, "/restart"))
-  {
-    // {"restart":"true"}
-    const cJSON *j_restart = cJSON_GetObjectItem(root, "restart");
-    const char *restart =
-        j_restart && cJSON_IsString(j_restart) ? j_restart->valuestring : "";
-    OSI_LOGI(TAG, "[RESTART] restart=%s", restart);
-    if (strcmp(restart, "true") == 0)
+    if (url && url[0] != '\0')
     {
-      customer_dux_publish_device_power(0);
-      osiSysReset();
+      OSI_LOGI(TAG, "[OTA-UPDATE] Starting OTA update: url=%s, type=%s", url, type ? type : "(default)");
+      customer_app_update_start(url, type);
     }
+    else
+    {
+      OSI_LOGE(TAG, "[OTA-UPDATE] Invalid or missing URL");
+    }
+    cJSON_Delete(root);
   }
-  else if (strstr(topic, "/update-lang"))
+  /* =========================================================================
+   * OPERATION 5: update-lang
+   * Input format: language_code [|request_id|device_id]
+   * ========================================================================= */
+  else if (strstr(topic, "update-lang") || strstr(buf, "update-lang|") == buf || strncmp(buf, "update-lang |", 13) == 0)
   {
+    cJSON *root = NULL;
+    if (buf[0] == '{')
+    {
+      root = cJSON_Parse(buf);
+    }
+    else
+    {
+      char *tokens[5] = {0};
+      int count = prv_split_pipe_tokens(buf, tokens, 5);
+      for (int i = 0; i < count; i++)
+      {
+        tokens[i] = prv_str_trim(tokens[i]);
+      }
+      root = cJSON_CreateObject();
+      if (root)
+      {
+        int t_idx = 0;
+        if (count > 1 && (strcasecmp(tokens[0], "update-lang") == 0 || strcasecmp(tokens[0], "update_lang") == 0))
+        {
+          t_idx = 1;
+        }
+        const char *lang_code = (count > t_idx) ? tokens[t_idx] : "";
+        cJSON_AddStringToObject(root, "lang_support", lang_code);
+        cJSON_AddStringToObject(root, "language", lang_code);
+        if (count > t_idx + 1 && tokens[t_idx + 1][0] != '\0')
+        {
+          double req_id = strtod(tokens[t_idx + 1], NULL);
+          if (req_id > 0)
+          {
+            cJSON_AddNumberToObject(root, "request_id", req_id);
+          }
+        }
+        if (count > t_idx + 2 && tokens[t_idx + 2][0] != '\0')
+        {
+          cJSON_AddStringToObject(root, "deviceId", tokens[t_idx + 2]);
+        }
+      }
+    }
+
+    if (!root)
+    {
+      OSI_LOGE(TAG, "[LANG-UPDATE] Failed to create or parse JSON object");
+      return;
+    }
+
     const cJSON *j_lang = cJSON_GetObjectItem(root, "lang_support");
     if (!j_lang)
       j_lang = cJSON_GetObjectItem(root, "language");
@@ -898,17 +1018,19 @@ static void template_handle_server_message(const char *topic,
       j_lang = cJSON_GetObjectItem(root, "lang");
     if (!j_lang)
       j_lang = cJSON_GetObjectItem(root, "active_language");
-    const char *lang =
-        j_lang && cJSON_IsString(j_lang) ? j_lang->valuestring : "";
+    const char *lang = (j_lang && cJSON_IsString(j_lang)) ? j_lang->valuestring : "";
     OSI_LOGI(TAG, "[LANG-UPDATE] lang_support=%s", lang);
     if (lang && lang[0] != '\0')
     {
       customer_set_default_language(lang);
     }
+    else
+    {
+      OSI_LOGW(TAG, "[LANG-UPDATE] Missing or empty language code");
+    }
     OSI_LOGI(TAG, "[LANG-UPDATE] active language set to: %s (folder: %s)",
              customer_get_default_language(), soundbox_get_current_audio_folder());
 
-    // Extract fields or fallback to hardcoded sample values
     const cJSON *j_req_id = cJSON_GetObjectItem(root, "request_id");
     if (!j_req_id)
       j_req_id = cJSON_GetObjectItem(root, "requestId");
@@ -944,34 +1066,267 @@ static void template_handle_server_message(const char *topic,
     const char *dev_id_str = (j_dev_id && cJSON_IsString(j_dev_id)) ? j_dev_id->valuestring : NULL;
     const char *act_lang_str = (j_act_lang && cJSON_IsString(j_act_lang)) ? j_act_lang->valuestring : NULL;
 
-    customer_send_change_language_ack(req_id,
-                                      dev_id_str,
-                                      " Success ",
-                                      "",
-                                      act_lang_str);
+    customer_send_change_language_ack(
+        req_id,
+        dev_id_str,
+        " Success ",
+        "",
+        act_lang_str);
+
+    cJSON_Delete(root);
   }
-  else if (strstr(topic, "/activation"))
+  /* =========================================================================
+   * OPERATION 6: activation
+   * ========================================================================= */
+  else if (strstr(topic, "activation"))
   {
-    // {"status":"SUCCESS"}
-    const cJSON *j_status = cJSON_GetObjectItem(root, "status");
-    const char *status =
-        j_status && cJSON_IsString(j_status) ? j_status->valuestring : "";
-    OSI_LOGI(TAG, "[ACTIVATION] status=%s", status);
+    OSI_LOGI(TAG, "[ACTIVATION] Processing activation prompt");
     audio_resource_play_combo_async_mid_priority(
         PAYMENT_AUDIO_FOLDER, "activation-device.mp3", NULL, 1);
   }
-  else if (strstr(topic, "audio-download"))
+  else if (strstr(topic, "audio-patch") ||
+           strncmp(buf, "audio-patch|", 12) == 0)
   {
-    customer_audio_download_from_json(root);
+    char *tokens[3] = {0};
+
+    int count = prv_split_pipe_tokens(buf, tokens, 3);
+
+    for (int i = 0; i < count; i++)
+    {
+      tokens[i] = prv_str_trim(tokens[i]);
+    }
+
+    /*
+     * Expected payload:
+     * audio-patch|flag|url
+     *
+     * Example:
+     * audio-patch|1|https://example.com/audio/
+     */
+
+    if (count < 3 ||
+        tokens[1] == NULL || tokens[1][0] == '\0' ||
+        tokens[2] == NULL || tokens[2][0] == '\0')
+    {
+      OSI_LOGE(TAG,
+               "[AUDIO-PATCH] Invalid payload. Expected: audio-patch|flag|url");
+    }
+    else
+    {
+      char *endptr = NULL;
+      long flag_value = strtol(tokens[1], &endptr, 10);
+
+      if (endptr == tokens[1] ||
+          *endptr != '\0' ||
+          (flag_value != 0 && flag_value != 1))
+      {
+        OSI_LOGE(TAG,
+                 "[AUDIO-PATCH] Invalid flag value: %s",
+                 tokens[1]);
+      }
+      else
+      {
+        int flag = (int)flag_value;
+        const char *url = tokens[2];
+        const char *language = customer_get_default_language();
+
+        OSI_LOGI(TAG,
+                 "[AUDIO-PATCH] flag=%d, url=%s, language=%s",
+                 flag,
+                 url,
+                 language ? language : "(null)");
+
+        tms_exception_download_status_t exe_status =
+            tms_exception_download_process(
+                flag,
+                url,
+                language);
+
+        OSI_LOGI(TAG,
+                 "[AUDIO-PATCH] Exception download status=%d",
+                 (int)exe_status);
+      }
+    }
   }
+  /* =========================================================================
+   * OPERATION 7: Payment messages (Pipe-delimited or JSON)
+   * ========================================================================= */
   else
   {
-    OSI_LOGI(TAG, "Received message on unknown topic: %s", topic);
+    /* 1. Pipe-delimited Payment format:
+     * Language|Mode of payment|Amount|...|Transaction Id
+     * e.g. "EN|UPI|1590.00| | |415857764147"
+     */
+    if (strchr(buf, '|'))
+    {
+      char *tokens[10] = {0};
+      int token_count = prv_split_pipe_tokens(buf, tokens, 10);
+      for (int i = 0; i < token_count; i++)
+      {
+        tokens[i] = prv_str_trim(tokens[i]);
+      }
+
+      if (token_count >= 3)
+      {
+        const char *lang_str = customer_get_default_language();
+        const char *mode = (token_count > 1) ? tokens[1] : "";
+        const char *amount_str = (token_count > 2) ? tokens[2] : "0.00";
+
+        const char *transaction_id = "";
+        for (int i = token_count - 1; i >= 3; i--)
+        {
+          if (tokens[i][0] != '\0')
+          {
+            transaction_id = tokens[i];
+            break;
+          }
+        }
+
+        double amount_val = atof(amount_str);
+        uint64_t rupees = (uint64_t)amount_val;
+        uint32_t paise = (uint32_t)((amount_val - (double)rupees) * 100.0 + 0.5);
+        if (paise >= 100)
+        {
+          rupees += 1;
+          paise = 0;
+        }
+
+        OSI_LOGI(TAG,
+                 "[PIPE-PAYMENT] lang=%s, mode=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), txn_id=%s",
+                 lang_str, mode, amount_str, amount_val,
+                 (unsigned long long)rupees, (unsigned long)paise, transaction_id);
+
+        payment_broadcast_params_t params = {0};
+        params.amount = rupees;
+        params.rupees = rupees;
+        params.paise = paise;
+        params.total_amount = amount_val;
+        strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
+        strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
+        strncpy(params.language, lang_str, sizeof(params.language) - 1);
+
+        int ret = customer_payment_broadcast(&params);
+        if (ret != 0)
+        {
+          payment_callback_t callback = {0};
+          strncpy(callback.serial_number, sn, sizeof(callback.serial_number) - 1);
+          strncpy(callback.status, "0", sizeof(callback.status) - 1);
+          strncpy(callback.transaction_id, transaction_id, sizeof(callback.transaction_id) - 1);
+          strncpy(callback.amount, amount_str, sizeof(callback.amount) - 1);
+          strncpy(callback.language, lang_str, sizeof(callback.language) - 1);
+          strncpy(callback.reason, "Broadcast failed", sizeof(callback.reason) - 1);
+          osiTime_t now = {0};
+          osiGetTime(&now);
+          snprintf(callback.sound_played_datetime, sizeof(callback.sound_played_datetime),
+                   "%04d-%02d-%02d %02d:%02d:%02d",
+                   now.tm_year, now.tm_mon, now.tm_mday,
+                   now.tm_hour, now.tm_min, now.tm_sec);
+          customer_status_report_payment(&callback);
+        }
+        return;
+      }
+    }
+
+    /* 2. JSON-formatted payment format */
+    if (buf[0] == '{')
+    {
+      cJSON *root = cJSON_Parse(buf);
+      if (!root)
+      {
+        OSI_LOGE(TAG, "[JSON-PAYMENT] Parse error: %s", buf);
+        return;
+      }
+
+      const cJSON *j_id = cJSON_GetObjectItem(root, "transaction_id");
+      if (!j_id)
+        j_id = cJSON_GetObjectItem(root, "TxnId");
+
+      const cJSON *j_amount = cJSON_GetObjectItem(root, "amount");
+      if (!j_amount)
+        j_amount = cJSON_GetObjectItem(root, "Amount");
+
+      const cJSON *j_status = cJSON_GetObjectItem(root, "status");
+
+      const cJSON *j_lang = cJSON_GetObjectItem(root, "language");
+      if (!j_lang)
+        j_lang = cJSON_GetObjectItem(root, "Language");
+      if (!j_lang)
+        j_lang = cJSON_GetObjectItem(root, "lang");
+      if (!j_lang)
+        j_lang = cJSON_GetObjectItem(root, "Lang");
+
+      const char *transaction_id = (j_id && cJSON_IsString(j_id)) ? j_id->valuestring : "";
+
+      char amount_str[16] = {0};
+      double amount_val = 0.0;
+      if (j_amount)
+      {
+        if (cJSON_IsNumber(j_amount))
+        {
+          amount_val = j_amount->valuedouble;
+          snprintf(amount_str, sizeof(amount_str), "%.2f", amount_val);
+        }
+        else if (cJSON_IsString(j_amount) && j_amount->valuestring)
+        {
+          strncpy(amount_str, j_amount->valuestring, sizeof(amount_str) - 1);
+          amount_val = atof(amount_str);
+        }
+      }
+      uint64_t rupees = (uint64_t)amount_val;
+      uint32_t paise = (uint32_t)((amount_val - (double)rupees) * 100.0 + 0.5);
+      if (paise >= 100)
+      {
+        rupees += 1;
+        paise = 0;
+      }
+
+      const char *lang_str = (j_lang && cJSON_IsString(j_lang)) ? j_lang->valuestring : NULL;
+      if (!lang_str || lang_str[0] == '\0')
+      {
+        lang_str = customer_get_default_language();
+      }
+
+      const char *status = (j_status && cJSON_IsString(j_status)) ? j_status->valuestring : "";
+      OSI_LOGI(TAG,
+               "[PAYMENT] id=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), lang=%s, status=%s",
+               transaction_id, amount_str, amount_val, (unsigned long long)rupees,
+               (unsigned long)paise, lang_str, status);
+
+      payment_broadcast_params_t params = {0};
+      params.amount = rupees;
+      params.rupees = rupees;
+      params.paise = paise;
+      params.total_amount = amount_val;
+      strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
+      strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
+      strncpy(params.language, lang_str, sizeof(params.language) - 1);
+
+      int ret = customer_payment_broadcast(&params);
+      if (ret != 0)
+      {
+        payment_callback_t callback = {0};
+        strncpy(callback.serial_number, sn, sizeof(callback.serial_number) - 1);
+        strncpy(callback.status, "0", sizeof(callback.status) - 1);
+        strncpy(callback.transaction_id, transaction_id, sizeof(callback.transaction_id) - 1);
+        strncpy(callback.amount, amount_str, sizeof(callback.amount) - 1);
+        strncpy(callback.language, lang_str, sizeof(callback.language) - 1);
+        strncpy(callback.reason, "Broadcast failed", sizeof(callback.reason) - 1);
+        osiTime_t now = {0};
+        osiGetTime(&now);
+        snprintf(callback.sound_played_datetime, sizeof(callback.sound_played_datetime),
+                 "%04d-%02d-%02d %02d:%02d:%02d",
+                 now.tm_year, now.tm_mon, now.tm_mday,
+                 now.tm_hour, now.tm_min, now.tm_sec);
+        customer_status_report_payment(&callback);
+      }
+      cJSON_Delete(root);
+      return;
+    }
+
+    OSI_LOGW(TAG, "[MQTT] Received message on unknown topic or unhandled payload: topic=%s", topic);
   }
-  cJSON_Delete(root);
 }
 
-// MQTT message callback
 static int template_mqtt_message_handler(const char *topic, const char *payload,
                                          uint32_t payload_len)
 {
@@ -1033,9 +1388,12 @@ static int customer_mqtt_config_handler(mqtt_config_t *config)
     return -1;
   }
 
-  if (mqtt_reg.ip[0] != '\0') {
+  if (mqtt_reg.ip[0] != '\0')
+  {
     snprintf(config->ip, sizeof(config->ip), "%s", mqtt_reg.ip);
-  } else {
+  }
+  else
+  {
     snprintf(config->ip, sizeof(config->ip), "%s", "1.7.140.58");
   }
   config->host = config->ip;
@@ -1046,15 +1404,18 @@ static int customer_mqtt_config_handler(mqtt_config_t *config)
   config->keepalive_sec = 120;
   config->clean_session = 1;
   config->default_qos = 1;
-  config->enable_ssl = 0;   // Plain TCP as per server endpoint & MQTTX
+  config->enable_ssl = 0; // Plain TCP as per server endpoint & MQTTX
   config->cert = NULL;
   config->sni_host = NULL;
 
-  if (mqtt_reg.username[0] != '\0') {
+  if (mqtt_reg.username[0] != '\0')
+  {
     config->username = mqtt_reg.username;
     config->password = mqtt_reg.password;
     config->auth_type = MQTT_AUTH_USERNAME_PASSWORD;
-  } else {
+  }
+  else
+  {
     config->username = NULL;
     config->password = NULL;
     config->auth_type = MQTT_AUTH_NONE;
@@ -1089,9 +1450,12 @@ int customer_mqtt_init(void)
                                              NULL);
 
   mqtt_config_t config = {0};
-  if (mqtt_reg.ip[0] != '\0') {
+  if (mqtt_reg.ip[0] != '\0')
+  {
     snprintf(config.ip, sizeof(config.ip), "%s", mqtt_reg.ip);
-  } else {
+  }
+  else
+  {
     snprintf(config.ip, sizeof(config.ip), "%s", "1.7.140.58");
   }
   config.host = config.ip;
@@ -1102,11 +1466,14 @@ int customer_mqtt_init(void)
   config.clean_session = 1;
   config.default_qos = 1;
   config.enable_ssl = 0;
-  if (mqtt_reg.username[0] != '\0') {
+  if (mqtt_reg.username[0] != '\0')
+  {
     config.username = mqtt_reg.username;
     config.password = mqtt_reg.password;
     config.auth_type = MQTT_AUTH_USERNAME_PASSWORD;
-  } else {
+  }
+  else
+  {
     config.auth_type = MQTT_AUTH_NONE;
   }
   reconnect_count_idx = 0;

@@ -18,7 +18,7 @@
 
 #define TAG "SB_LANG"
 
-static soundbox_language_t s_active_language = LANGUAGE_ENGLISH;
+static soundbox_language_t s_active_language = SOUNDBOX_DEFAULT_LANGUAGE;
 static bool s_soundbox_lang_initialized = false;
 static osiMutex_t *s_lang_mutex = NULL;
 
@@ -193,13 +193,70 @@ bool soundbox_str_to_language(const char *str, soundbox_language_t *out_lang)
     return false;
 }
 
+int soundbox_ensure_language_file_exists(void)
+{
+    OSI_LOGI(TAG, "[LANG-CHECK] Checking %s existence during boot...", TEMPLATE_LANGUAGE_FILE_PATH);
+
+    int flen = fs_size(TEMPLATE_LANGUAGE_FILE_PATH);
+    if (flen > 0) {
+        OSI_LOGI(TAG, "[LANG-CHECK] %s already exists (%d bytes). Preserving existing configuration.",
+                 TEMPLATE_LANGUAGE_FILE_PATH, flen);
+        return 0;
+    }
+
+    OSI_LOGI(TAG, "[LANG-CHECK] Fresh boot detected: %s does not exist (flen=%d). Initializing with default audio language...",
+             TEMPLATE_LANGUAGE_FILE_PATH, flen);
+
+    soundbox_language_t default_lang = SOUNDBOX_DEFAULT_LANGUAGE;
+    const char *num_str = soundbox_language_to_numeric_str(default_lang);
+    const char *lang_name = soundbox_language_name(default_lang);
+
+    int fd = fs_open(TEMPLATE_LANGUAGE_FILE_PATH, "wb+");
+    if (fd <= 0) {
+        OSI_LOGE(TAG, "[LANG-INIT-FAIL] Failed to create %s (fd=%d). Safe fallback to default language (%s: %s).",
+                 TEMPLATE_LANGUAGE_FILE_PATH, fd, lang_name, num_str);
+        return -1;
+    }
+
+    char write_buf[16] = {0};
+    snprintf(write_buf, sizeof(write_buf), "%s\n", num_str);
+    size_t write_len = strlen(write_buf);
+
+    int written = fs_write((void *)write_buf, 1, write_len, fd);
+    fs_close(fd);
+
+    if (written != (int)write_len) {
+        OSI_LOGE(TAG, "[LANG-INIT-FAIL] Failed to write default language to %s (written=%d, expected=%u).",
+                 TEMPLATE_LANGUAGE_FILE_PATH, written, (unsigned int)write_len);
+        return -2;
+    }
+
+    OSI_LOGI(TAG, "[LANG-INIT-OK] %s created successfully! Stored default audio language '%s' (code %s).",
+             TEMPLATE_LANGUAGE_FILE_PATH, lang_name, num_str);
+
+    /* Also persist to fallback location for redundancy */
+    int f_bak = fs_open(TEMPLATE_LANGUAGE_FILE_FALLBACK, "wb+");
+    if (f_bak > 0) {
+        fs_write((void *)write_buf, 1, write_len, f_bak);
+        fs_close(f_bak);
+    }
+
+    return 0;
+}
+
 int soundbox_load_language(soundbox_language_t *language)
 {
-    soundbox_language_t detected_lang = LANGUAGE_ENGLISH;
+    soundbox_language_t detected_lang = SOUNDBOX_DEFAULT_LANGUAGE;
     bool success = false;
     const char *path = NULL;
 
     int flen = fs_size(TEMPLATE_LANGUAGE_FILE_PATH);
+    if (flen <= 0) {
+        /* File does not exist yet; ensure created with default language */
+        soundbox_ensure_language_file_exists();
+        flen = fs_size(TEMPLATE_LANGUAGE_FILE_PATH);
+    }
+
     if (flen > 0) {
         path = TEMPLATE_LANGUAGE_FILE_PATH;
     } else {
@@ -210,19 +267,22 @@ int soundbox_load_language(soundbox_language_t *language)
     }
 
     if (path == NULL) {
-        OSI_LOGW(TAG, "[LANG-LOAD] %s not present or empty (flen=%d). Preserving file, using fallback: English (0)",
-                 TEMPLATE_LANGUAGE_FILE_PATH, flen);
+        OSI_LOGW(TAG, "[LANG-LOAD] %s not present or empty (flen=%d). Safe fallback: %s (%s)",
+                 TEMPLATE_LANGUAGE_FILE_PATH, flen,
+                 soundbox_language_name(SOUNDBOX_DEFAULT_LANGUAGE),
+                 soundbox_language_to_numeric_str(SOUNDBOX_DEFAULT_LANGUAGE));
         if (language) {
-            *language = LANGUAGE_ENGLISH;
+            *language = SOUNDBOX_DEFAULT_LANGUAGE;
         }
         return -1;
     }
 
     int fd = fs_open(path, "rb");
     if (fd < 0) {
-        OSI_LOGE(TAG, "[LANG-LOAD] Failed to open %s for read (fd=%d). Using fallback: English (0)", path, fd);
+        OSI_LOGE(TAG, "[LANG-LOAD] Failed to open %s for read (fd=%d). Using default fallback: %s (%s)",
+                 path, fd, soundbox_language_name(SOUNDBOX_DEFAULT_LANGUAGE), soundbox_language_to_numeric_str(SOUNDBOX_DEFAULT_LANGUAGE));
         if (language) {
-            *language = LANGUAGE_ENGLISH;
+            *language = SOUNDBOX_DEFAULT_LANGUAGE;
         }
         return -2;
     }
@@ -232,9 +292,10 @@ int soundbox_load_language(soundbox_language_t *language)
     fs_close(fd);
 
     if (rlen <= 0) {
-        OSI_LOGE(TAG, "[LANG-LOAD] Empty or unreadable %s (rlen=%d). Using fallback: English (0)", path, rlen);
+        OSI_LOGE(TAG, "[LANG-LOAD] Empty or unreadable %s (rlen=%d). Using default fallback: %s (%s)",
+                 path, rlen, soundbox_language_name(SOUNDBOX_DEFAULT_LANGUAGE), soundbox_language_to_numeric_str(SOUNDBOX_DEFAULT_LANGUAGE));
         if (language) {
-            *language = LANGUAGE_ENGLISH;
+            *language = SOUNDBOX_DEFAULT_LANGUAGE;
         }
         return -3;
     }
@@ -243,9 +304,10 @@ int soundbox_load_language(soundbox_language_t *language)
     char *trimmed = prv_str_trim(lang_buf);
 
     if (trimmed[0] == '\0') {
-        OSI_LOGE(TAG, "[LANG-LOAD] %s contains only whitespace. Using fallback: English (0)", path);
+        OSI_LOGE(TAG, "[LANG-LOAD] %s contains only whitespace. Using default fallback: %s (%s)",
+                 path, soundbox_language_name(SOUNDBOX_DEFAULT_LANGUAGE), soundbox_language_to_numeric_str(SOUNDBOX_DEFAULT_LANGUAGE));
         if (language) {
-            *language = LANGUAGE_ENGLISH;
+            *language = SOUNDBOX_DEFAULT_LANGUAGE;
         }
         return -4;
     }
@@ -276,10 +338,10 @@ int soundbox_load_language(soundbox_language_t *language)
     }
 
     if (!success) {
-        OSI_LOGE(TAG, "[LANG-LOAD] Invalid/unsupported language code '%s' in %s. Preserving file, using fallback: English (0)",
-                 trimmed, path);
+        OSI_LOGE(TAG, "[LANG-LOAD] Invalid/unsupported language code '%s' in %s. Preserving file, using default fallback: %s (%s)",
+                 trimmed, path, soundbox_language_name(SOUNDBOX_DEFAULT_LANGUAGE), soundbox_language_to_numeric_str(SOUNDBOX_DEFAULT_LANGUAGE));
         if (language) {
-            *language = LANGUAGE_ENGLISH;
+            *language = SOUNDBOX_DEFAULT_LANGUAGE;
         }
         return -5;
     }
@@ -385,7 +447,11 @@ void soundbox_language_init(void)
         return;
     }
 
-    soundbox_language_t loaded_lang = LANGUAGE_ENGLISH;
+    /* 1. Ensure language.txt exists during fresh boot */
+    soundbox_ensure_language_file_exists();
+
+    /* 2. Load language preference from file */
+    soundbox_language_t loaded_lang = SOUNDBOX_DEFAULT_LANGUAGE;
     int ret = soundbox_load_language(&loaded_lang);
     (void)ret;
 
