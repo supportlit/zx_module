@@ -4,6 +4,7 @@
  */
 
 #include "customer_handlers.h"
+#include "soundbox_language.h"
 #include "customer_mqtt_handler.h"
 #include "customer_payment_handler.h"
 #include "customer_status_report.h"
@@ -33,6 +34,7 @@
 #include "mbedtls/md5.h"
 #include "at_api.h"
 #include "customer_register.h"
+#include "customer_audio_download.h"
 #define TAG "TEMPLATE"
 
 #define LED_W1_PIN 54
@@ -1361,6 +1363,7 @@ int customer_msg_handler(framework_msg_t *msg)
 void customer_init(void)
 {
     osiExceptionDumpEnable(false);
+    customer_audio_download_init();
     osiSetPMEnableSleep(0); // add by vipin: disable PM sleep so CPU/network stays awake and receives MQTT in real-time
     appLcdInit();           // LCD init
     appLcdenable();         // LCD enable
@@ -1394,7 +1397,7 @@ void customer_init(void)
         bk_led_on_net_well_server_connect();
     }
     char imei[32] = {0};
-    snprintf(imei, sizeof(imei), "BP02%s", framework_network_get_imei());
+    snprintf(imei, sizeof(imei), "BP02%s", "867772071407197");
     OSI_LOGI(TAG, "Setting device SN to IMEI: %s", imei);
     framework_device_config_set_sn(imei);
     if (customer_battery_config_register() != 0)
@@ -1405,12 +1408,9 @@ void customer_init(void)
     {
         OSI_LOGI(0, "TEMPLATE: Battery config registered");
     }
-    OSI_LOGI(TAG, "Playing welcome sound");
-    if ((strcmp(audio_resource_get_language_prefix(), AUDIO_LANG_FEMALE_PATH)) && (strcmp(audio_resource_get_language_prefix(), AUDIO_LANG_MALE_PATH)))
-    {
-        audio_resource_set_language_prefix(AUDIO_LANG_FEMALE_PATH);
-    }
-    // audio_resource_set_language_prefix(AUDIO_LANG_FEMALE_PATH);
+    const char *active_folder = soundbox_get_current_audio_folder();
+    OSI_LOGI(TAG, "Playing startup sound (folder=%s)", active_folder);
+    audio_resource_set_language_prefix(active_folder);
     audio_resource_play_high_priority(AUDIO_RES_SYS_STARTUP, NULL);
     framework_msg_register_callback(customer_msg_handler);
     audio_resource_play_combo_async_mid_priority("", "using-net-gprs.mp3", NULL, 0);

@@ -4,6 +4,7 @@
  */
 
 #include "customer_payment_handler.h"
+#include "soundbox_language.h"
 #include "customer_mqtt_handler.h"
 #include "framework_log.h"
 #include "framework_audio.h"
@@ -31,7 +32,7 @@ static int prv_add_audio_name(char *buf, size_t buf_size, const char *filename) 
     return 0;
 }
 
-#define AUDIO_FOLDER_PATH "D:/FEMALE/"
+#define AUDIO_FOLDER_PATH soundbox_get_current_audio_folder()
 
 static bool prv_is_lang_hindi(const char *lang);
 
@@ -115,20 +116,27 @@ static bool prv_try_file_with_lang(char *buf, size_t buf_size, const char *folde
         }
     }
 
-    // Fallback: check root D:/ if folder was D:/FEMALE/
-    if (strcmp(folder, "D:/FEMALE/") == 0) {
-        snprintf(full_path, sizeof(full_path), "D:/%s", fname);
-        if (fs_size(full_path) > 0) {
-            prv_add_audio_name(buf, buf_size, fname);
-            return true;
-        }
+    // Fallback: check root D:/
+    snprintf(full_path, sizeof(full_path), "D:/%s", fname);
+    if (fs_size(full_path) > 0) {
+        prv_add_audio_name(buf, buf_size, fname);
+        return true;
     }
     return false;
 }
 
 // add by vipin: add audio file checking language variations, 2-digit padding, and currency aliases in D:/FEMALE/
 static int prv_add_lang_audio(char *buf, size_t buf_size, const char *filename, const char *lang) {
-    const char *folder = AUDIO_FOLDER_PATH; // strictly D:/FEMALE/ (no subdirectories created)
+    const char *folder = AUDIO_FOLDER_PATH;
+    if (lang && lang[0] != '\0') {
+        soundbox_language_t l;
+        if (soundbox_str_to_language(lang, &l)) {
+            const char *f = soundbox_get_audio_folder(l);
+            if (f != NULL) {
+                folder = f;
+            }
+        }
+    }
 
     // 1. Try direct / lang variants for primary filename
     if (prv_try_file_with_lang(buf, buf_size, folder, filename, lang)) {
@@ -703,13 +711,20 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
         return -1;
     }
 
-    audio_resource_set_language_prefix(AUDIO_FOLDER_PATH);
-
     const char *lang_str = (params->language[0] != '\0') ? params->language : customer_get_default_language();
+    const char *active_folder = AUDIO_FOLDER_PATH;
+    soundbox_language_t l;
+    if (soundbox_str_to_language(lang_str, &l)) {
+        const char *f = soundbox_get_audio_folder(l);
+        if (f != NULL) {
+            active_folder = f;
+        }
+    }
+    audio_resource_set_language_prefix(active_folder);
 
     FRAMEWORK_LOG("Payment broadcast: rupees=%llu, paise=%lu, total=%.2f, lang=%s, folder=%s, is_replay=%d", 
                   (unsigned long long)params->rupees, (unsigned long)params->paise, params->total_amount,
-                  lang_str, AUDIO_FOLDER_PATH, is_replay);
+                  lang_str, active_folder, is_replay);
 
     if (!is_replay) {
         s_total_txn_count++; // add by vipin: increment transaction count for new payment

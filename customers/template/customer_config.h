@@ -37,7 +37,9 @@
 #define ONBOARD_API_URL "/api/v1/devicepool/onboard"
 #define ONBOARD_API_PORT 443
 
-// 音频资源路径（仅保留 FEMALE/MALE，默认 FEMALE）
+// 音频资源路径
+#define ENGLISH_AUDIO_FOLDER "D:/ENG/"
+#define HINDI_AUDIO_FOLDER   "D:/HI/"
 #define AUDIO_LANG_FEMALE_PATH "D:/FEMALE/"
 #define AUDIO_LANG_MALE_PATH "D:/MALE/"
 #define DEFAULT_LANGUAGE 0

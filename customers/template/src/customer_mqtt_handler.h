@@ -7,8 +7,19 @@
 #define __CUSTOMER_MQTT_HANDLER_H__
 
 #include "framework_msg.h"
+#include "soundbox_language.h"
 #include <stdbool.h>
 
+typedef struct 
+{
+  char ip[64];
+  int port;
+  char username[64];
+  char password[64];
+  int ssl_enable;
+} mqtt_register_info;
+
+extern mqtt_register_info mqtt_reg;
 int customer_mqtt_init(void);
 int customer_mqtt_network_ready(void);
 

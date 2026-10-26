@@ -157,6 +157,77 @@ const char *tms_map_ack_status(bool requested, bool success)
     return success ? TMS_ACK_FLAG_SUCCESS : TMS_ACK_FLAG_FAILED;
 }
 
+static int count_valid_manifest_entries(const char *manifest_text, bool *out_has_malformed)
+{
+    if (!manifest_text) {
+        return 0;
+    }
+
+    int count = 0;
+    bool malformed = false;
+    const char *p = manifest_text;
+
+    while (*p != '\0') {
+        while (*p == '\r' || *p == '\n') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+
+        const char *line_start = p;
+        while (*p != '\0' && *p != '\r' && *p != '\n') {
+            p++;
+        }
+
+        const char *pipe = NULL;
+        bool non_space = false;
+        for (const char *s = line_start; s < p; s++) {
+            if (*s == '|') {
+                pipe = s;
+            } else if (!isspace((unsigned char)*s)) {
+                non_space = true;
+            }
+        }
+
+        if (!non_space) {
+            continue;
+        }
+
+        if (!pipe) {
+            malformed = true;
+            continue;
+        }
+
+        bool url_has_chars = false;
+        for (const char *s = line_start; s < pipe; s++) {
+            if (!isspace((unsigned char)*s)) {
+                url_has_chars = true;
+                break;
+            }
+        }
+
+        bool dst_has_chars = false;
+        for (const char *s = pipe + 1; s < p; s++) {
+            if (!isspace((unsigned char)*s)) {
+                dst_has_chars = true;
+                break;
+            }
+        }
+
+        if (url_has_chars && dst_has_chars) {
+            count++;
+        } else {
+            malformed = true;
+        }
+    }
+
+    if (out_has_malformed) {
+        *out_has_malformed = malformed;
+    }
+    return count;
+}
+
 tms_exception_download_status_t tms_exception_download_process(
     int exception_flag,
     const char *manifest_url,
@@ -243,10 +314,23 @@ tms_exception_download_status_t tms_exception_download_process(
              http_code, (unsigned int)strlen(gen_buf));
 
     /* 6. Parse GEN.txt line by line (<download_url>|<destination_path>) */
+    bool pre_malformed = false;
+    int expected_entries = count_valid_manifest_entries(gen_buf, &pre_malformed);
+    OSI_LOGI(TAG, "GEN.txt pre-scan: %d valid entries found (has_malformed=%d)",
+             expected_entries, (int)pre_malformed);
+
+    uint32_t batch_id = 0;
+    if (expected_entries > 0) {
+        batch_id = customer_audio_batch_start(expected_entries);
+        if (pre_malformed) {
+            customer_audio_batch_record_queue_failure(batch_id);
+        }
+    }
+
     int total_entries = 0;
     int successful_downloads = 0;
     int failed_downloads = 0;
-    bool has_malformed_entries = false;
+    bool has_malformed_entries = pre_malformed;
 
     char *curr = gen_buf;
     int line_num = 0;
@@ -283,6 +367,9 @@ tms_exception_download_status_t tms_exception_download_process(
             OSI_LOGE(TAG, "GEN.txt Line %d malformed (missing '|' delimiter): '%s'", line_num, line_start);
             has_malformed_entries = true;
             failed_downloads++;
+            if (batch_id != 0) {
+                customer_audio_batch_record_queue_failure(batch_id);
+            }
             continue;
         }
 
@@ -298,14 +385,17 @@ tms_exception_download_status_t tms_exception_download_process(
                      line_num, entry_url, entry_dst);
             has_malformed_entries = true;
             failed_downloads++;
+            if (batch_id != 0) {
+                customer_audio_batch_record_queue_failure(batch_id);
+            }
             continue;
         }
 
         total_entries++;
         OSI_LOGI(TAG, "[GEN Entry #%d] URL=%s -> DST=%s", total_entries, entry_url, entry_dst);
 
-        /* Call the existing single MP3 download handler */
-        int dl_ret = customer_audio_download_handle_single_mp3(entry_url, entry_dst, default_lang);
+        /* Call the single MP3 download handler with restart_after_download = false */
+        int dl_ret = customer_audio_download_handle_single_mp3(entry_url, entry_dst, default_lang, false);
         if (dl_ret != 0) {
             OSI_LOGE(TAG, "[GEN Entry #%d] Handler failed to queue download (ret=%d): %s -> %s",
                      total_entries, dl_ret, entry_url, entry_dst);
@@ -315,6 +405,10 @@ tms_exception_download_status_t tms_exception_download_process(
                      total_entries, entry_url, entry_dst);
             successful_downloads++;
         }
+    }
+
+    if (batch_id != 0) {
+        customer_audio_batch_finish_scheduling(batch_id);
     }
 
     free(gen_buf);

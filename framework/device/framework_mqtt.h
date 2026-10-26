@@ -76,7 +76,7 @@ typedef struct {
     char *host;                     /**< MQTT broker hostname or IP */
     char *sni_host;                 /**< SNI hostname for TLS (optional) */
     uint16_t port;                  /**< MQTT broker port */
-    
+    char ip[64];
     /* Client identification */
     char *client_id;                /**< MQTT client ID */
     

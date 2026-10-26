@@ -41,12 +41,12 @@
 /* Standard JSON POST request body. Replace hardcoded device values as needed. */
 static const char *s_hardcoded_json_req =
     "{"
-    "\"serial_no\":\"00001504QR70W031184\","
-    "\"app_version\":\"1.0.0.3\","
+    "\"serial_no\":\"BP02869683086200139\","
+    "\"app_version\":\"2.0.0.6\","
     "\"audio_version\":\"MP3_V1.0_20221116\","
-    "\"TMSIPPort\":\"https://1.7.140.58/hmp\","
+    "\"TMSIPPort\":\"https://1.7.140.58\","
     "\"IMEI\":\"867772071407197\","
-    "\"SIMNo\":\"8991200050051682685F\","
+    "\"SIMNo\":\"89914526034074312745\","
     "\"firmware_version\":\"v1.2.0\","
     "\"active_language\":\"1\""
     "}";
@@ -446,6 +446,23 @@ void tms_registration_task(void *param)
         // int res = tms_register_with_redirect(&tms_info);
 
         /* 1. Validate registration function result & confirm response was parsed successfully */
+        if (tms_info.mqtt_ip[0] != '\0') {
+            snprintf(mqtt_reg.ip, sizeof(mqtt_reg.ip), "%s", tms_info.mqtt_ip);
+            if (tms_info.mqtt_port > 0) {
+                mqtt_reg.port = tms_info.mqtt_port;
+            } else {
+                mqtt_reg.port = 9000;
+            }
+            snprintf(mqtt_reg.username, sizeof(mqtt_reg.username), "%s", tms_info.mqtt_user);
+            snprintf(mqtt_reg.password, sizeof(mqtt_reg.password), "%s", tms_info.mqtt_pass);
+            mqtt_reg.ssl_enable = tms_info.mqtt_ssl_enable;
+            OSI_LOGI(TAG, "Configured mqtt_reg: %s:%d (user=%s, ssl=%d)",
+                     mqtt_reg.ip, mqtt_reg.port, mqtt_reg.username, mqtt_reg.ssl_enable);
+        } else {
+            snprintf(mqtt_reg.ip, sizeof(mqtt_reg.ip), "%s", "1.7.140.58");
+            mqtt_reg.port = 9000;
+            mqtt_reg.ssl_enable = 0;
+        }
         if (res == 0)
         {
             /* 2. Inspect the actual response code field */
@@ -551,7 +568,7 @@ void tms_registration_task(void *param)
         bool wel_requested = (tms_info.welcome_file_flag == 1);
         bool wel_success = false;
 
-        if (wel_requested)
+        if (0)
         {
             OSI_LOGI(TAG, "Welcome audio download requested (flag=1)");
             bool url_present = (tms_info.welcome_file_url[0] != '\0');
@@ -680,7 +697,8 @@ void tms_registration_task(void *param)
                         int download_ret = customer_audio_download_handle_single_mp3(
                             tms_info.welcome_file_url,
                             welcome_dst,
-                            current_lang
+                            current_lang,
+                            true
                         );
 
                         if (download_ret == 0)
@@ -703,35 +721,35 @@ void tms_registration_task(void *param)
         }
 
         /* 3. Execute TMS Exception Audio/File Download Workflow (15th & 16th response fields) */
-        tms_exception_download_status_t exe_status = tms_exception_download_process(
-            tms_info.exception_file_flag,
-            tms_info.exception_file_url,
-            customer_get_default_language()
-        );
+        // tms_exception_download_status_t exe_status = tms_exception_download_process(
+        //     tms_info.exception_file_flag,
+        //     tms_info.exception_file_url,
+        //     customer_get_default_language()
+        // );
 
         /* 4. Send Consolidated UPDATESBFLAG Acknowledgement (Section 10) */
-        if (wel_requested || tms_info.exception_file_flag == 1)
-        {
-            const char *wel_flag_str = tms_map_ack_status(wel_requested, wel_success);
-            const char *exe_flag_str = tms_map_ack_status(tms_info.exception_file_flag == 1,
-                                                          exe_status == TMS_EXCEPTION_DOWNLOAD_SUCCESS);
+        // if (wel_requested || tms_info.exception_file_flag == 1)
+        // {
+        //     const char *wel_flag_str = tms_map_ack_status(wel_requested, wel_success);
+        //     const char *exe_flag_str = tms_map_ack_status(tms_info.exception_file_flag == 1,
+        //                                                   exe_status == TMS_EXCEPTION_DOWNLOAD_SUCCESS);
 
-            OSI_LOGI(TAG, "Dispatching consolidated UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s",
-                     wel_flag_str, exe_flag_str);
+        //     OSI_LOGI(TAG, "Dispatching consolidated UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s",
+        //              wel_flag_str, exe_flag_str);
 
-            int ack_ret = tms_send_update_sb_flag_ack(
-                TMS_REGISTRATION_URL,
-                NULL, /* Automatically fetch serial_no */
-                tms_info.participant_id,
-                wel_flag_str,
-                exe_flag_str
-            );
-            if (ack_ret != 0) {
-                OSI_LOGE(TAG, "UPDATESBFLAG ACK dispatch failed: %d", ack_ret);
-            } else {
-                OSI_LOGI(TAG, "UPDATESBFLAG ACK dispatch succeeded");
-            }
-        }
+        //     int ack_ret = tms_send_update_sb_flag_ack(
+        //         TMS_REGISTRATION_URL,
+        //         NULL, /* Automatically fetch serial_no */
+        //         tms_info.participant_id,
+        //         wel_flag_str,
+        //         exe_flag_str
+        //     );
+        //     if (ack_ret != 0) {
+        //         OSI_LOGE(TAG, "UPDATESBFLAG ACK dispatch failed: %d", ack_ret);
+        //     } else {
+        //         OSI_LOGI(TAG, "UPDATESBFLAG ACK dispatch succeeded");
+        //     }
+        //}
 
         /* Initialize MQTT handler using TMS info */
         customer_mqtt_network_ready();

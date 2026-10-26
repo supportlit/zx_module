@@ -41,7 +41,7 @@ typedef enum {
  * 2. Fetches the initial manifest file via HTTP GET (e.g. ..._Exception.txt).
  * 3. Extracts the GEN.txt manifest URL from the response.
  * 4. Fetches and parses GEN.txt line-by-line (<download_url>|<destination_path>).
- * 5. Calls customer_audio_download_handle_single_mp3(url, dst, lang) for each entry.
+ * 5. Calls customer_audio_download_handle_single_mp3(url, dst, lang, false) for each entry.
  *
  * @param exception_flag 15th field from TMS registration (1 = available, 0 = skip)
  * @param manifest_url   16th field from TMS registration (initial exception manifest URL)
