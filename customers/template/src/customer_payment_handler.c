@@ -513,11 +513,88 @@ static uint32_t s_last_txn_count = 0;  // add by vipin: transaction count of las
 static osiTimer_t *s_lcd_idle_timer = NULL;
 static osiWork_t *s_lcd_idle_work = NULL;
 
+static osiTimer_t *s_lcd_rotate_timer = NULL;
+static osiWork_t *s_lcd_rotate_work = NULL;
+
+typedef enum {
+    LCD_ROTATE_HITACHI = 0,
+    LCD_ROTATE_TIME    = 1,
+    LCD_ROTATE_DATE    = 2,
+} lcd_rotate_stage_t;
+
+static lcd_rotate_stage_t s_lcd_rotate_stage = LCD_ROTATE_HITACHI;
+static bool s_is_payment_active = false;
+
+static void prv_lcd_rotate_timer_callback(void *param);
+
+static void prv_lcd_rotate_work_callback(void *param)
+{
+    (void)param;
+    if (s_is_payment_active) {
+        return; // Payment display takes precedence, do not rotate
+    }
+
+    switch (s_lcd_rotate_stage) {
+    case LCD_ROTATE_HITACHI:
+        FRAMEWORK_LOG("[LCD] Rotating Screen (1/3): HITACHI");
+        appLcdShowTextHitachi();
+        s_lcd_rotate_stage = LCD_ROTATE_TIME;
+        break;
+    case LCD_ROTATE_TIME:
+        FRAMEWORK_LOG("[LCD] Rotating Screen (2/3): TIME");
+        appLcdShowTime();
+        s_lcd_rotate_stage = LCD_ROTATE_DATE;
+        break;
+    case LCD_ROTATE_DATE:
+        FRAMEWORK_LOG("[LCD] Rotating Screen (3/3): DATE");
+        appLcdShowDate();
+        s_lcd_rotate_stage = LCD_ROTATE_HITACHI;
+        break;
+    default:
+        s_lcd_rotate_stage = LCD_ROTATE_HITACHI;
+        appLcdShowTextHitachi();
+        break;
+    }
+
+    // Schedule next 5-second rotation
+    if (!s_is_payment_active && s_lcd_rotate_timer != NULL) {
+        osiTimerStart(s_lcd_rotate_timer, 5000);
+    }
+}
+
+static void prv_lcd_rotate_timer_callback(void *param)
+{
+    (void)param;
+    if (s_is_payment_active) {
+        return;
+    }
+    if (s_lcd_rotate_timer != NULL) {
+        osiTimerStop(s_lcd_rotate_timer);
+    }
+    if (s_lcd_rotate_work == NULL) {
+        s_lcd_rotate_work = osiWorkCreate(prv_lcd_rotate_work_callback, NULL, NULL);
+    }
+    if (s_lcd_rotate_work != NULL) {
+        osiWorkEnqueue(s_lcd_rotate_work, osiSysWorkQueueLowPriority());
+    }
+}
+
 static void prv_lcd_idle_work_callback(void *param)
 {
     (void)param;
-    FRAMEWORK_LOG("LCD 10s idle timeout reached, reverting to HITACHI screen");
+    FRAMEWORK_LOG("LCD 10s payment timeout reached, resuming rotating idle screens");
+    s_is_payment_active = false;
+    s_lcd_rotate_stage = LCD_ROTATE_TIME; // We display HITACHI now, next 5s rotation is TIME
     appLcdShowTextHitachi();
+
+    // Start 5s rotation from HITACHI -> TIME -> DATE
+    if (s_lcd_rotate_timer == NULL) {
+        s_lcd_rotate_timer = osiTimerCreate(prv_lcd_rotate_timer_callback, NULL);
+    }
+    if (s_lcd_rotate_timer != NULL) {
+        osiTimerStop(s_lcd_rotate_timer);
+        osiTimerStart(s_lcd_rotate_timer, 5000);
+    }
 }
 
 static void prv_lcd_idle_timer_callback(void *param)
@@ -533,6 +610,32 @@ static void prv_lcd_idle_timer_callback(void *param)
         osiWorkEnqueue(s_lcd_idle_work, osiSysWorkQueueLowPriority());
     }
 }
+
+void customer_lcd_start_rotating_idle(void)
+{
+    FRAMEWORK_LOG("Starting 5s rotating idle screen (HITACHI -> TIME -> DATE)");
+    s_is_payment_active = false;
+    s_lcd_rotate_stage = LCD_ROTATE_TIME; // After initial HITACHI, next is TIME
+    appLcdShowTextHitachi();
+
+    if (s_lcd_rotate_timer == NULL) {
+        s_lcd_rotate_timer = osiTimerCreate(prv_lcd_rotate_timer_callback, NULL);
+    }
+    if (s_lcd_rotate_timer != NULL) {
+        osiTimerStop(s_lcd_rotate_timer);
+        osiTimerStart(s_lcd_rotate_timer, 5000);
+    }
+}
+
+void customer_lcd_stop_rotating_idle(void)
+{
+    if (s_lcd_rotate_timer != NULL) {
+        osiTimerStop(s_lcd_rotate_timer);
+    }
+}
+#else
+void customer_lcd_start_rotating_idle(void) {}
+void customer_lcd_stop_rotating_idle(void) {}
 #endif
 
 static char s_pending_txn_id[64] = {0};
@@ -653,6 +756,12 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
     }
     FRAMEWORK_LOG("Playing combo payment audio: folder=%s, list=%s", PAYMENT_AUDIO_FOLDER, audio_list);
 #if defined(CUSTOMER_ENABLE_LCD) && (CUSTOMER_ENABLE_LCD == 1)
+    // add by vipin: Stop rotating idle screen immediately and prioritize payment display
+    s_is_payment_active = true;
+    if (s_lcd_rotate_timer != NULL) {
+        osiTimerStop(s_lcd_rotate_timer);
+    }
+
     // add by vipin: Display amount with Rs icon, tick, decimal and total transaction count on LCD
     lcdParam_t lcd = {0};
     lcd.lcd_hook = true;      // Success tick
@@ -668,7 +777,7 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
 #endif
     appLcdset(lcd);
 
-    // add by vipin: Show amount for 10 seconds then revert to idle "HITACHI" screen
+    // add by vipin: Show amount for 10 seconds then resume rotating idle screen
     if (s_lcd_idle_timer == NULL) {
         s_lcd_idle_timer = osiTimerCreate(prv_lcd_idle_timer_callback, NULL);
     }

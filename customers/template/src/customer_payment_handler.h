@@ -25,5 +25,7 @@ int customer_payment_broadcast(const payment_broadcast_params_t *params);
 int customer_payment_replay_last(void);
 uint32_t customer_payment_get_total_count(void); // add by vipin: get total successful transactions count
 void customer_payment_reset_total_count(void);   // add by vipin: reset transaction counter (e.g. daily/boot)
+void customer_lcd_start_rotating_idle(void);     // add by vipin: start 5s rotating idle screen (Hitachi -> Time -> Date)
+void customer_lcd_stop_rotating_idle(void);      // add by vipin: stop rotating idle screen
 
 #endif /* __CUSTOMER_PAYMENT_HANDLER_H__ */

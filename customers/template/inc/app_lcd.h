@@ -45,6 +45,10 @@ void Paytm_LCD_Set_Signal_Levl(int levl);
 void Paytm_LCD_Set_Volume_Levl(int levl);
 void appLcdShowTextLIT(void);
 void appLcdShowTextHitachi(void);
+void appLcdShowTime(void);
+void appLcdShowDate(void);
+void appLcdShowTimeVal(int hour, int min, int sec);
+void appLcdShowDateVal(int day, int mon, int year);
 
 #else /* CUSTOMER_ENABLE_LCD == 0: LCD Disabled / Normal Run Stubs (add by vipin) */
 
@@ -69,6 +73,10 @@ static inline void Paytm_LCD_Set_Signal_Levl(int levl) { (void)levl; }
 static inline void Paytm_LCD_Set_Volume_Levl(int levl) { (void)levl; }
 static inline void appLcdShowTextLIT(void) {}
 static inline void appLcdShowTextHitachi(void) {}
+static inline void appLcdShowTime(void) {}
+static inline void appLcdShowDate(void) {}
+static inline void appLcdShowTimeVal(int hour, int min, int sec) { (void)hour; (void)min; (void)sec; }
+static inline void appLcdShowDateVal(int day, int mon, int year) { (void)day; (void)mon; (void)year; }
 
 #endif /* CUSTOMER_ENABLE_LCD */
 

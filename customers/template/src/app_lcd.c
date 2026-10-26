@@ -1395,7 +1395,7 @@ void appLcdShowTextHitachi(void) {
       0x76, // 'H' (digit 0)
       0x06, // 'I' (digit 1)
       0x07, // 'T' left half  (───┐) (digit 2)
-      0x31, // 'T' right half (┌───) (digit 3)
+      0x01, // 'T' right half (┌───) (digit 3)
       0x77, // 'A' (digit 4)
       0x39, // 'C' (digit 5)
       0x76, // 'H' (digit 6)
@@ -1442,6 +1442,184 @@ void appLcdShowTextHitachi(void) {
   osiMutexUnlock(lcdFlagMux);
 
   appAllrefresh();
+}
+
+// add by vipin: Show Time in HH.MM.SS format on the 8 digits (e.g. 12.45.30)
+void appLcdShowTimeVal(int hour, int min, int sec) {
+  if (lcdFlagMux == NULL) {
+    return;
+  }
+
+  static const short recv_data_map[8][7] = {
+      {COM_ROW(4, 7), COM_ROW(0, 7), COM_ROW(2, 7), COM_ROW(7, 7), COM_ROW(6, 7), COM_ROW(5, 7), COM_ROW(1, 7)}, // Digit 0
+      {COM_ROW(4, 6), COM_ROW(0, 6), COM_ROW(2, 6), COM_ROW(7, 6), COM_ROW(6, 6), COM_ROW(5, 6), COM_ROW(1, 6)}, // Digit 1
+      {COM_ROW(4, 5), COM_ROW(0, 5), COM_ROW(2, 5), COM_ROW(7, 5), COM_ROW(6, 5), COM_ROW(5, 5), COM_ROW(1, 5)}, // Digit 2
+      {COM_ROW(4, 4), COM_ROW(0, 4), COM_ROW(2, 4), COM_ROW(7, 4), COM_ROW(6, 4), COM_ROW(5, 4), COM_ROW(1, 4)}, // Digit 3
+      {COM_ROW(4, 3), COM_ROW(0, 3), COM_ROW(2, 3), COM_ROW(7, 3), COM_ROW(6, 3), COM_ROW(5, 3), COM_ROW(1, 3)}, // Digit 4
+      {COM_ROW(4, 2), COM_ROW(0, 2), COM_ROW(2, 2), COM_ROW(7, 2), COM_ROW(6, 2), COM_ROW(5, 2), COM_ROW(1, 2)}, // Digit 5
+      {COM_ROW(4, 1), COM_ROW(0, 1), COM_ROW(2, 1), COM_ROW(7, 1), COM_ROW(6, 1), COM_ROW(5, 1), COM_ROW(1, 1)}, // Digit 6
+      {COM_ROW(4, 0), COM_ROW(0, 0), COM_ROW(2, 0), COM_ROW(7, 0), COM_ROW(6, 0), COM_ROW(5, 0), COM_ROW(1, 0)}, // Digit 7
+  };
+
+  static const uint8_t s_digits_7seg[10] = {
+      0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
+  };
+
+  // Keep Day count badge and count digits visible on bottom row
+  uint32_t count = customer_payment_get_total_count();
+  if (count > 0) {
+    Paytm_LCD_Set_Count_En(true);
+    prvLcdReceiveAmountSet(count);
+  } else {
+    Paytm_LCD_Set_Count_En(false);
+    prvLcdReceiveAmountClr();
+  }
+
+  // Normalize time values
+  if (hour < 0) hour = 0; if (hour > 23) hour = 23;
+  if (min < 0) min = 0;   if (min > 59) min = 59;
+  if (sec < 0) sec = 0;   if (sec > 59) sec = 59;
+
+  // Digits 1..6 symmetrically centered: [blank][H1][H0.][M1][M0.][S1][S0][blank]
+  uint8_t patterns[8] = {
+      0x00,                                 // Digit 0: Blank
+      s_digits_7seg[(hour / 10) % 10],       // Digit 1: Hours tens
+      s_digits_7seg[hour % 10],             // Digit 2: Hours units
+      s_digits_7seg[(min / 10) % 10],        // Digit 3: Minutes tens
+      s_digits_7seg[min % 10],              // Digit 4: Minutes units
+      s_digits_7seg[(sec / 10) % 10],        // Digit 5: Seconds tens
+      s_digits_7seg[sec % 10],              // Digit 6: Seconds units
+      0x00                                  // Digit 7: Blank
+  };
+
+  osiMutexLock(lcdFlagMux);
+
+  // Clear Hook (row 13 bit 2) and Paytm (row 13 bit 3)
+  disp_buf[13] &= ~((0x01 << 2) | (0x01 << 3));
+  // Clear RS (row 10 bit 0)
+  disp_buf[10] &= ~(0x01 << 0);
+
+  // Clear all decimal points (COM 3 on rows 0-7)
+  for (int r = 0; r < 8; r++) {
+    disp_buf[r] &= ~(0x01 << 3);
+  }
+
+  // Set decimal points for colon simulation after Digit 2 and Digit 4:
+  disp_buf[5] |= (0x01 << 3);
+  disp_buf[3] |= (0x01 << 3);
+
+  // Draw 7-segment patterns
+  for (int i = 0; i < 8; i++) {
+    uint8_t dig = patterns[i];
+    for (int j = 0; j < 7; j++) {
+      int row_idx = ROW(recv_data_map[i][j]);
+      int com_idx = COM(recv_data_map[i][j]);
+      if (dig & 0x01) {
+        disp_buf[row_idx] |= (0x01 << com_idx);
+      } else {
+        disp_buf[row_idx] &= ((0x01 << com_idx) ^ 0xff);
+      }
+      dig >>= 1;
+    }
+  }
+
+  osiMutexUnlock(lcdFlagMux);
+  appAllrefresh();
+}
+
+void appLcdShowTime(void) {
+  osiTime_t now = {0};
+  osiGetTime(&now);
+  appLcdShowTimeVal(now.tm_hour, now.tm_min, now.tm_sec);
+}
+
+// add by vipin: Show Date in DD.MM.YY format on the 8 digits (e.g. 24.10.26)
+void appLcdShowDateVal(int day, int mon, int year) {
+  if (lcdFlagMux == NULL) {
+    return;
+  }
+
+  static const short recv_data_map[8][7] = {
+      {COM_ROW(4, 7), COM_ROW(0, 7), COM_ROW(2, 7), COM_ROW(7, 7), COM_ROW(6, 7), COM_ROW(5, 7), COM_ROW(1, 7)},
+      {COM_ROW(4, 6), COM_ROW(0, 6), COM_ROW(2, 6), COM_ROW(7, 6), COM_ROW(6, 6), COM_ROW(5, 6), COM_ROW(1, 6)},
+      {COM_ROW(4, 5), COM_ROW(0, 5), COM_ROW(2, 5), COM_ROW(7, 5), COM_ROW(6, 5), COM_ROW(5, 5), COM_ROW(1, 5)},
+      {COM_ROW(4, 4), COM_ROW(0, 4), COM_ROW(2, 4), COM_ROW(7, 4), COM_ROW(6, 4), COM_ROW(5, 4), COM_ROW(1, 4)},
+      {COM_ROW(4, 3), COM_ROW(0, 3), COM_ROW(2, 3), COM_ROW(7, 3), COM_ROW(6, 3), COM_ROW(5, 3), COM_ROW(1, 3)},
+      {COM_ROW(4, 2), COM_ROW(0, 2), COM_ROW(2, 2), COM_ROW(7, 2), COM_ROW(6, 2), COM_ROW(5, 2), COM_ROW(1, 2)},
+      {COM_ROW(4, 1), COM_ROW(0, 1), COM_ROW(2, 1), COM_ROW(7, 1), COM_ROW(6, 1), COM_ROW(5, 1), COM_ROW(1, 1)},
+      {COM_ROW(4, 0), COM_ROW(0, 0), COM_ROW(2, 0), COM_ROW(7, 0), COM_ROW(6, 0), COM_ROW(5, 0), COM_ROW(1, 0)},
+  };
+
+  static const uint8_t s_digits_7seg[10] = {
+      0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
+  };
+
+  // Keep Day count badge and count digits visible on bottom row
+  uint32_t count = customer_payment_get_total_count();
+  if (count > 0) {
+    Paytm_LCD_Set_Count_En(true);
+    prvLcdReceiveAmountSet(count);
+  } else {
+    Paytm_LCD_Set_Count_En(false);
+    prvLcdReceiveAmountClr();
+  }
+
+  // Normalize date values
+  if (day < 1) day = 1;   if (day > 31) day = 31;
+  if (mon < 1) mon = 1;   if (mon > 12) mon = 12;
+  int yr_2digit = (year >= 0) ? (year % 100) : 0;
+
+  // Digits 1..6 symmetrically centered: [blank][D1][D0.][M1][M0.][Y1][Y0][blank]
+  uint8_t patterns[8] = {
+      0x00,                                 // Digit 0: Blank
+      s_digits_7seg[(day / 10) % 10],        // Digit 1: Day tens
+      s_digits_7seg[day % 10],              // Digit 2: Day units
+      s_digits_7seg[(mon / 10) % 10],        // Digit 3: Month tens
+      s_digits_7seg[mon % 10],              // Digit 4: Month units
+      s_digits_7seg[(yr_2digit / 10) % 10],  // Digit 5: Year tens
+      s_digits_7seg[yr_2digit % 10],        // Digit 6: Year units
+      0x00                                  // Digit 7: Blank
+  };
+
+  osiMutexLock(lcdFlagMux);
+
+  // Clear Hook (row 13 bit 2) and Paytm (row 13 bit 3)
+  disp_buf[13] &= ~((0x01 << 2) | (0x01 << 3));
+  // Clear RS (row 10 bit 0)
+  disp_buf[10] &= ~(0x01 << 0);
+
+  // Clear all decimal points (COM 3 on rows 0-7)
+  for (int r = 0; r < 8; r++) {
+    disp_buf[r] &= ~(0x01 << 3);
+  }
+
+  // Set decimal points after Digit 2 and Digit 4:
+  disp_buf[5] |= (0x01 << 3);
+  disp_buf[3] |= (0x01 << 3);
+
+  // Draw 7-segment patterns
+  for (int i = 0; i < 8; i++) {
+    uint8_t dig = patterns[i];
+    for (int j = 0; j < 7; j++) {
+      int row_idx = ROW(recv_data_map[i][j]);
+      int com_idx = COM(recv_data_map[i][j]);
+      if (dig & 0x01) {
+        disp_buf[row_idx] |= (0x01 << com_idx);
+      } else {
+        disp_buf[row_idx] &= ((0x01 << com_idx) ^ 0xff);
+      }
+      dig >>= 1;
+    }
+  }
+
+  osiMutexUnlock(lcdFlagMux);
+  appAllrefresh();
+}
+
+void appLcdShowDate(void) {
+  osiTime_t now = {0};
+  osiGetTime(&now);
+  appLcdShowDateVal(now.tm_mday, now.tm_mon, now.tm_year);
 }
 
 #endif /* CUSTOMER_ENABLE_LCD */
