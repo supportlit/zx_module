@@ -264,6 +264,30 @@ static framework_ntp_result_e prv_ntp_sync_one(const char *server, uint32_t time
 
 #define IST_TIMEZONE_OFFSET_SEC (5 * 3600 + 30 * 60) /* +5:30 = 19800 seconds */
 
+static void prv_epoch_to_ositime(uint32_t epoch, osiTime_t *out)
+{
+    if (!out) return;
+    uint32_t days = epoch / 86400;
+    uint32_t rem = epoch % 86400;
+
+    out->tm_hour = (int)(rem / 3600);
+    out->tm_min  = (int)((rem % 3600) / 60);
+    out->tm_sec  = (int)(rem % 60);
+
+    /* Civil date calculation from days since 1970-01-01 (Euclidean affine algorithm) */
+    uint32_t a = days + 719468;
+    uint32_t b = (4 * a + 3) / 146097;
+    uint32_t c = a - (146097 * b) / 4;
+    uint32_t d_calc = (4 * c + 3) / 1461;
+    uint32_t e = c - (1461 * d_calc) / 4;
+    uint32_t m_calc = (5 * e + 2) / 153;
+
+    out->tm_mday = (int)(e - (153 * m_calc + 2) / 5 + 1);
+    out->tm_mon  = (int)(m_calc + 3 - 12 * (m_calc / 10));
+    out->tm_year = (int)(b * 100 + d_calc + (m_calc / 10));
+    out->tm_wday = (int)((days + 4) % 7);
+}
+
 static void prv_ntp_apply_time(time_t ts)
 {
     osiTime_t before_sys = {0}, before_rtc = {0};
@@ -289,51 +313,32 @@ static void prv_ntp_apply_time(time_t ts)
     }
 
     /* Convert UTC NTP timestamp to IST (+5:30 = 19800 seconds) */
-    time_t ist_ts = ts + IST_TIMEZONE_OFFSET_SEC;
-    struct tm *ist_tm = gmtime(&ist_ts);
+    uint32_t ist_ts = (uint32_t)ts + IST_TIMEZONE_OFFSET_SEC;
+    osiTime_t rtc_time = {0};
+    prv_epoch_to_ositime(ist_ts, &rtc_time);
 
-    if (ist_tm) {
-        OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Calculated IST datetime: %04d-%02d-%02d %02d:%02d:%02d",
-                 ist_tm->tm_year + 1900, ist_tm->tm_mon + 1, ist_tm->tm_mday,
-                 ist_tm->tm_hour, ist_tm->tm_min, ist_tm->tm_sec);
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Calculated IST datetime: %04d-%02d-%02d %02d:%02d:%02d",
+             rtc_time.tm_year, rtc_time.tm_mon, rtc_time.tm_mday,
+             rtc_time.tm_hour, rtc_time.tm_min, rtc_time.tm_sec);
 
-        /* 1. Set Hardware RTC directly to IST (osiSetTime) */
-        osiTime_t rtc_time = {0};
-        rtc_time.tm_year = ist_tm->tm_year + 1900;
-        rtc_time.tm_mon  = ist_tm->tm_mon + 1;
-        rtc_time.tm_mday = ist_tm->tm_mday;
-        rtc_time.tm_hour = ist_tm->tm_hour;
-        rtc_time.tm_min  = ist_tm->tm_min;
-        rtc_time.tm_sec  = ist_tm->tm_sec;
+    /* 1. Set Hardware RTC directly to IST (osiSetTime) */
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Setting IST to Hardware RtcTime: %04d-%02d-%02d %02d:%02d:%02d",
+             rtc_time.tm_year, rtc_time.tm_mon, rtc_time.tm_mday,
+             rtc_time.tm_hour, rtc_time.tm_min, rtc_time.tm_sec);
+    osiSetTime(&rtc_time);
 
-        OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Setting IST to Hardware RtcTime: %04d-%02d-%02d %02d:%02d:%02d",
-                 rtc_time.tm_year, rtc_time.tm_mon, rtc_time.tm_mday,
-                 rtc_time.tm_hour, rtc_time.tm_min, rtc_time.tm_sec);
-        osiSetTime(&rtc_time);
+    /* 2. Set System time (osiSetSysTime).
+     * osiSetSysTime internally subtracts 8 hours (kernel UTC+8 conversion)
+     * from its input and modifies the struct in place. To make SysTime equal to IST,
+     * we feed (IST + 8 hours) so that after the internal -8h conversion, SysTime == IST. */
+    uint32_t sys_feed_ts = ist_ts + (8 * 3600);
+    osiTime_t sys_time = {0};
+    prv_epoch_to_ositime(sys_feed_ts, &sys_time);
 
-        /* 2. Set System time (osiSetSysTime).
-         * osiSetSysTime internally subtracts 8 hours (kernel UTC+8 conversion)
-         * from its input and modifies the struct in place. To make SysTime equal to IST,
-         * we feed (IST + 8 hours) so that after the internal -8h conversion, SysTime == IST. */
-        time_t sys_feed_ts = ist_ts + (8 * 3600);
-        struct tm *sys_feed_tm = gmtime(&sys_feed_ts);
-        if (sys_feed_tm) {
-            osiTime_t sys_time = {0};
-            sys_time.tm_year = sys_feed_tm->tm_year + 1900;
-            sys_time.tm_mon  = sys_feed_tm->tm_mon + 1;
-            sys_time.tm_mday = sys_feed_tm->tm_mday;
-            sys_time.tm_hour = sys_feed_tm->tm_hour;
-            sys_time.tm_min  = sys_feed_tm->tm_min;
-            sys_time.tm_sec  = sys_feed_tm->tm_sec;
-
-            OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Setting IST to SysTime (feed +8h: %04d-%02d-%02d %02d:%02d:%02d)",
-                     sys_time.tm_year, sys_time.tm_mon, sys_time.tm_mday,
-                     sys_time.tm_hour, sys_time.tm_min, sys_time.tm_sec);
-            osiSetSysTime(&sys_time);
-        }
-    } else {
-        OSI_LOGE("Test-Time", "[prv_ntp_apply_time] ERROR: gmtime(&ist_ts) returned NULL!");
-    }
+    OSI_LOGI("Test-Time", "[prv_ntp_apply_time] Setting IST to SysTime (feed +8h: %04d-%02d-%02d %02d:%02d:%02d)",
+             sys_time.tm_year, sys_time.tm_mon, sys_time.tm_mday,
+             sys_time.tm_hour, sys_time.tm_min, sys_time.tm_sec);
+    osiSetSysTime(&sys_time);
 
     osiTime_t after_sys = {0}, after_rtc = {0};
     osiGetSysTime(&after_sys);

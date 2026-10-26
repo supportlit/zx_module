@@ -600,7 +600,6 @@ int customer_dux_publish_health_status(void)
     cJSON_AddStringToObject(json, "serial_no", sn);
     cJSON_AddStringToObject(json, "Network", customer_dux_get_network_quality_str());
     cJSON_AddStringToObject(json, "Battery", battery_str);
-    cJSON_AddStringToObject(json, "Device_Status_DateTime", dt_buf);
 
     int ret = prv_publish_json(TOPIC_DUX_HEALTH_STATUS, json);
     ret=prv_send_json(json);
