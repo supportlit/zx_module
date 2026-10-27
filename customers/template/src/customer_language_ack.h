@@ -19,4 +19,19 @@
 int customer_send_language_ack(double request_id, const char *uuid, const char *device_id,
                                const char *status, const char *reason);
 
+/**
+ * @brief Send Language File Download Acknowledgement to TMS synchronously
+ * @details Blocks until the server responds or timeout occurs
+ * 
+ * @param request_id Request ID
+ * @param uuid UUID string
+ * @param device_id Device ID
+ * @param status Status string ("Success" or "Failed")
+ * @param reason Reason string ("" on success)
+ * @param timeout_ms Timeout in milliseconds (e.g. 15000)
+ * @return 0 on success (HTTP 200), negative on error/timeout
+ */
+int customer_send_language_ack_sync(double request_id, const char *uuid, const char *device_id,
+                                    const char *status, const char *reason, uint32_t timeout_ms);
+
 #endif /* CUSTOMER_LANGUAGE_ACK_H */

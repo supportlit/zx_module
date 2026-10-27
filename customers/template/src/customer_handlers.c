@@ -4,6 +4,7 @@
  */
 
 #include "customer_handlers.h"
+#include "customer_lang_download.h"
 #include "soundbox_language.h"
 #include "customer_mqtt_handler.h"
 #include "customer_payment_handler.h"
@@ -1340,6 +1341,7 @@ int customer_msg_handler(framework_msg_t *msg)
             return 0;
         }
         template_mqtt_handle_unzip_msg(msg);
+        customer_lang_download_handle_unzip_msg(msg);
         return 0;
     }
     case MSG_UNZIP_FAIL:
@@ -1352,6 +1354,7 @@ int customer_msg_handler(framework_msg_t *msg)
             return 0;
         }
         template_mqtt_handle_unzip_msg(msg);
+        customer_lang_download_handle_unzip_msg(msg);
         return 0;
     }
     default:

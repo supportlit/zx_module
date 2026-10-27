@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include "framework_log.h"
+#include "customer_register_test_config.h"
 
 // #define TAG "TMS_PARSE"
 #define TMS_MAX_FIELDS 32
@@ -45,4 +46,6 @@ typedef struct {
 } tms_registration_req_t;
 void tms_registration_task(void *param);
 int tms_register_device_sync(tms_registration_resp_t *out_resp);
+void customer_register_process_response(const tms_registration_resp_t *resp);
+void customer_register_clear_test_flag(void);
 #endif

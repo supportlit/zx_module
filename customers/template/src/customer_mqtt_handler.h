@@ -17,6 +17,7 @@ typedef struct
   char username[64];
   char password[64];
   int ssl_enable;
+  char partner_id[64];
 } mqtt_register_info;
 
 extern mqtt_register_info mqtt_reg;

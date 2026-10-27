@@ -1,0 +1,52 @@
+{
+  "ResponseCode": "00",
+  "ResponseMessage": "SUCCESS",
+  "request_id": 202540563751,
+  "biz_type": "F",
+  "deviceid": "00001504QR70W031163",
+  "newlanguage": "1",
+  "audio_inf": [
+    {
+      "url": "https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/hindi_id_01.zip",
+      "size": 117890,
+      "uuid": "202503240932385801",
+      "sign": "3518c14086873123b2faabffbe9920500c98a4ad731e03122f01ac22dcafc748"
+    },
+    {
+      "url": "https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/hindi_id_02.zip",
+      "size": 143669,
+      "uuid": "202503240932385802",
+      "sign": "984a5164fe0686dd3e47e2fe2dd2d8fd7d1b0507e1e7b9cddd9f337d11f99f28"
+    },
+    {
+      "url": "https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/hindi_id_03.zip",
+      "size": 149967,
+      "uuid": "202503240932385803",
+      "sign": "88aaf5a0eabdab0a86e708e806fc8bddddec20add14f8c9fa2fff7375b718502"
+    },
+    {
+      "url": "https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/hindi_id_04.zip",
+      "size": 143599,
+      "uuid": "202503240932385804",
+      "sign": "b02ce422b9ef3c92521b8eafbaff4a02321f965fecb635c3730654df4024f6f8"
+    },
+    {
+      "url": "https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/hindi_id_05.zip",
+      "size": 153114,
+      "uuid": "202503240932385805",
+      "sign": "b8f1f5c6852c9c0e5cbf262943417db7c430b5c31344388ab581efe9660943cc"
+    },
+    {
+      "url": "https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/hindi_id_06.zip",
+      "size": 193165,
+      "uuid": "202503240932385806",
+      "sign": "062cf8d0a8d1de12e2d8e891a432ed1f8a48ee4f46d7db22d95e796556b5143e"
+    },
+    {
+      "url": "https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/hindi_id_07.zip",
+      "size": 35755,
+      "uuid": "202503240932385807",
+      "sign": "142c75524440271929698484d7aa26328820fc86508677567085fc74169a7e26"
+    }
+  ]
+}

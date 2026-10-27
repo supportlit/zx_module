@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "TmsExceptionDownload.h"
+#include "customer_lang_download.h"
 #define TAG "TEMPLATE_MQTT"
 
 #define TEMPLATE_SOUND_ZIP_PATH "D:/template_sound_update.zip"
@@ -900,10 +901,29 @@ static void template_handle_server_message(const char *topic,
   }
   /* =========================================================================
    * OPERATION 4: ota-update
-   * Input format: url [|type]
+   * Input format: ota-update | <url> | <sha256_hash> (Secure OTA)
+   * Legacy format: url [|type] OR JSON {"url":"...", "type":"..."}
    * ========================================================================= */
-  else if (strstr(topic, "ota-update") || strstr(buf, "ota-update|") == buf || strncmp(buf, "ota-update |", 12) == 0)
+  else if (strstr(topic, "ota-update") ||
+           strstr(topic, "ota_update") ||
+           strncmp(buf, "ota-update", 10) == 0 ||
+           strncmp(buf, "ota_update", 10) == 0)
   {
+    /* Check for pipe-separated secure OTA format (non-JSON) */
+    if (buf[0] != '{' && strchr(buf, '|') != NULL)
+    {
+      int ota_ret = customer_app_update_handle_mqtt_command(buf);
+      if (ota_ret == 0)
+      {
+        return;
+      }
+      /* If explicit ota-update command failed validation or was rejected, stop processing */
+      if (strncmp(buf, "ota-update", 10) == 0 || strncmp(buf, "ota_update", 10) == 0)
+      {
+        return;
+      }
+    }
+
     cJSON *root = NULL;
     if (buf[0] == '{')
     {
@@ -962,110 +982,266 @@ static void template_handle_server_message(const char *topic,
    * OPERATION 5: update-lang
    * Input format: language_code [|request_id|device_id]
    * ========================================================================= */
-  else if (strstr(topic, "update-lang") || strstr(buf, "update-lang|") == buf || strncmp(buf, "update-lang |", 13) == 0)
-  {
+  else if (strstr(topic, "update-lang") ||
+         strstr(topic, "CHANGEDEFLANG") ||
+         strncmp(buf, "update-lang|", 12) == 0 ||
+         strncmp(buf, "update-lang |", 13) == 0 ||
+         strncmp(buf, "update_lang|", 12) == 0 ||
+         strncmp(buf, "CHANGEDEFLANG|", 14) == 0)
+{
     cJSON *root = NULL;
+    bool is_change_def_lang = false;
+
     if (buf[0] == '{')
     {
-      root = cJSON_Parse(buf);
+        /* Existing JSON payload support */
+        root = cJSON_Parse(buf);
     }
     else
     {
-      char *tokens[5] = {0};
-      int count = prv_split_pipe_tokens(buf, tokens, 5);
-      for (int i = 0; i < count; i++)
-      {
-        tokens[i] = prv_str_trim(tokens[i]);
-      }
-      root = cJSON_CreateObject();
-      if (root)
-      {
-        int t_idx = 0;
-        if (count > 1 && (strcasecmp(tokens[0], "update-lang") == 0 || strcasecmp(tokens[0], "update_lang") == 0))
+        char *tokens[5] = {0};
+        int count = prv_split_pipe_tokens(buf, tokens, 5);
+
+        for (int i = 0; i < count; i++)
         {
-          t_idx = 1;
+            tokens[i] = prv_str_trim(tokens[i]);
         }
-        const char *lang_code = (count > t_idx) ? tokens[t_idx] : "";
-        cJSON_AddStringToObject(root, "lang_support", lang_code);
-        cJSON_AddStringToObject(root, "language", lang_code);
-        if (count > t_idx + 1 && tokens[t_idx + 1][0] != '\0')
+
+        if (count > 0 &&
+            strcasecmp(tokens[0], "CHANGEDEFLANG") == 0)
         {
-          double req_id = strtod(tokens[t_idx + 1], NULL);
-          if (req_id > 0)
-          {
-            cJSON_AddNumberToObject(root, "request_id", req_id);
-          }
+            is_change_def_lang = true;
+
+            /*
+             * New format:
+             * CHANGEDEFLANG|DSN|request_id|HI
+             *
+             * tokens[0] = command
+             * tokens[1] = DSN
+             * tokens[2] = request_id
+             * tokens[3] = language
+             */
+            if (count < 4 ||
+                !tokens[1] || tokens[1][0] == '\0' ||
+                !tokens[2] || tokens[2][0] == '\0' ||
+                !tokens[3] || tokens[3][0] == '\0')
+            {
+                OSI_LOGE(TAG,
+                         "[LANG-UPDATE] Invalid CHANGEDEFLANG payload");
+                return;
+            }
+
+            char *endptr = NULL;
+            double parsed_req_id = strtod(tokens[2], &endptr);
+
+            if (endptr == tokens[2] ||
+                *endptr != '\0' ||
+                parsed_req_id <= 0)
+            {
+                OSI_LOGE(TAG,
+                         "[LANG-UPDATE] Invalid request_id: %s",
+                         tokens[2]);
+                return;
+            }
+
+            root = cJSON_CreateObject();
+            if (root)
+            {
+                cJSON_AddStringToObject(root, "deviceId", tokens[1]);
+                cJSON_AddNumberToObject(root, "request_id", parsed_req_id);
+                cJSON_AddStringToObject(root, "lang_support", tokens[3]);
+                cJSON_AddStringToObject(root, "language", tokens[3]);
+            }
         }
-        if (count > t_idx + 2 && tokens[t_idx + 2][0] != '\0')
+        else
         {
-          cJSON_AddStringToObject(root, "deviceId", tokens[t_idx + 2]);
+            /* Existing update-lang / update_lang pipe format */
+            root = cJSON_CreateObject();
+
+            if (root)
+            {
+                int t_idx = 0;
+
+                if (count > 0 &&
+                    (strcasecmp(tokens[0], "update-lang") == 0 ||
+                     strcasecmp(tokens[0], "update_lang") == 0))
+                {
+                    t_idx = 1;
+                }
+
+                const char *lang_code =
+                    (count > t_idx && tokens[t_idx])
+                        ? tokens[t_idx]
+                        : "";
+
+                cJSON_AddStringToObject(root, "lang_support", lang_code);
+                cJSON_AddStringToObject(root, "language", lang_code);
+
+                if (count > t_idx + 1 &&
+                    tokens[t_idx + 1] &&
+                    tokens[t_idx + 1][0] != '\0')
+                {
+                    char *endptr = NULL;
+                    double parsed_req_id =
+                        strtod(tokens[t_idx + 1], &endptr);
+
+                    if (endptr != tokens[t_idx + 1] &&
+                        *endptr == '\0' &&
+                        parsed_req_id > 0)
+                    {
+                        cJSON_AddNumberToObject(
+                            root, "request_id", parsed_req_id);
+                    }
+                }
+
+                if (count > t_idx + 2 &&
+                    tokens[t_idx + 2] &&
+                    tokens[t_idx + 2][0] != '\0')
+                {
+                    cJSON_AddStringToObject(
+                        root, "deviceId", tokens[t_idx + 2]);
+                }
+            }
         }
-      }
     }
 
     if (!root)
     {
-      OSI_LOGE(TAG, "[LANG-UPDATE] Failed to create or parse JSON object");
-      return;
+        OSI_LOGE(TAG,
+                 "[LANG-UPDATE] Failed to create or parse JSON object");
+        return;
     }
 
+    /* Get requested language */
     const cJSON *j_lang = cJSON_GetObjectItem(root, "lang_support");
-    if (!j_lang)
-      j_lang = cJSON_GetObjectItem(root, "language");
-    if (!j_lang)
-      j_lang = cJSON_GetObjectItem(root, "Language");
-    if (!j_lang)
-      j_lang = cJSON_GetObjectItem(root, "lang");
-    if (!j_lang)
-      j_lang = cJSON_GetObjectItem(root, "active_language");
-    const char *lang = (j_lang && cJSON_IsString(j_lang)) ? j_lang->valuestring : "";
-    OSI_LOGI(TAG, "[LANG-UPDATE] lang_support=%s", lang);
-    if (lang && lang[0] != '\0')
-    {
-      customer_set_default_language(lang);
-    }
-    else
-    {
-      OSI_LOGW(TAG, "[LANG-UPDATE] Missing or empty language code");
-    }
-    OSI_LOGI(TAG, "[LANG-UPDATE] active language set to: %s (folder: %s)",
-             customer_get_default_language(), soundbox_get_current_audio_folder());
 
+    if (!j_lang)
+        j_lang = cJSON_GetObjectItem(root, "language");
+    if (!j_lang)
+        j_lang = cJSON_GetObjectItem(root, "Language");
+    if (!j_lang)
+        j_lang = cJSON_GetObjectItem(root, "lang");
+    if (!j_lang)
+        j_lang = cJSON_GetObjectItem(root, "active_language");
+
+    const char *lang =
+        (j_lang && cJSON_IsString(j_lang) && j_lang->valuestring)
+            ? j_lang->valuestring
+            : "";
+
+    if (lang[0] == '\0')
+    {
+        OSI_LOGE(TAG, "[LANG-UPDATE] Missing or empty language code");
+        cJSON_Delete(root);
+        return;
+    }
+
+    OSI_LOGI(TAG, "[LANG-UPDATE] Requested language=%s", lang);
+
+    /* Update active language */
+    customer_set_default_language(lang);
+
+    OSI_LOGI(TAG,
+             "[LANG-UPDATE] active language set to: %s (folder: %s)",
+             customer_get_default_language(),
+             soundbox_get_current_audio_folder());
+
+    /* Get request ID */
     const cJSON *j_req_id = cJSON_GetObjectItem(root, "request_id");
-    if (!j_req_id)
-      j_req_id = cJSON_GetObjectItem(root, "requestId");
-    if (!j_req_id)
-      j_req_id = cJSON_GetObjectItem(root, "RequestId");
 
-    const cJSON *j_dev_id = cJSON_GetObjectItem(root, "deviceId");
-    if (!j_dev_id)
-      j_dev_id = cJSON_GetObjectItem(root, "device_id");
-    if (!j_dev_id)
-      j_dev_id = cJSON_GetObjectItem(root, "DeviceId");
-    if (!j_dev_id)
-      j_dev_id = cJSON_GetObjectItem(root, "serial_no");
-
-    const cJSON *j_act_lang = cJSON_GetObjectItem(root, "active_language");
-    if (!j_act_lang)
-      j_act_lang = cJSON_GetObjectItem(root, "active_lang");
-    if (!j_act_lang)
-      j_act_lang = j_lang;
+    if (!j_req_id)
+        j_req_id = cJSON_GetObjectItem(root, "requestId");
+    if (!j_req_id)
+        j_req_id = cJSON_GetObjectItem(root, "RequestId");
 
     double req_id = 0;
+
     if (j_req_id)
     {
-      if (cJSON_IsNumber(j_req_id))
-      {
-        req_id = j_req_id->valuedouble;
-      }
-      else if (cJSON_IsString(j_req_id) && j_req_id->valuestring)
-      {
-        req_id = strtod(j_req_id->valuestring, NULL);
-      }
-    }
-    const char *dev_id_str = (j_dev_id && cJSON_IsString(j_dev_id)) ? j_dev_id->valuestring : NULL;
-    const char *act_lang_str = (j_act_lang && cJSON_IsString(j_act_lang)) ? j_act_lang->valuestring : NULL;
+        if (cJSON_IsNumber(j_req_id))
+        {
+            req_id = j_req_id->valuedouble;
+        }
+        else if (cJSON_IsString(j_req_id) &&
+                 j_req_id->valuestring)
+        {
+            char *endptr = NULL;
+            req_id = strtod(j_req_id->valuestring, &endptr);
 
+            if (endptr == j_req_id->valuestring || *endptr != '\0')
+            {
+                req_id = 0;
+            }
+        }
+    }
+
+    /* Get device ID / DSN */
+    const cJSON *j_dev_id = cJSON_GetObjectItem(root, "deviceId");
+
+    if (!j_dev_id)
+        j_dev_id = cJSON_GetObjectItem(root, "device_id");
+    if (!j_dev_id)
+        j_dev_id = cJSON_GetObjectItem(root, "DeviceId");
+    if (!j_dev_id)
+        j_dev_id = cJSON_GetObjectItem(root, "serial_no");
+    if (!j_dev_id)
+        j_dev_id = cJSON_GetObjectItem(root, "DSN");
+
+    const char *dev_id_str =
+        (j_dev_id && cJSON_IsString(j_dev_id) &&
+         j_dev_id->valuestring && j_dev_id->valuestring[0] != '\0')
+            ? j_dev_id->valuestring
+            : NULL;
+
+    /* Get active language for acknowledgement */
+    const cJSON *j_act_lang =
+        cJSON_GetObjectItem(root, "active_language");
+
+    if (!j_act_lang)
+        j_act_lang = cJSON_GetObjectItem(root, "active_lang");
+
+    if (!j_act_lang)
+        j_act_lang = j_lang;
+
+    const char *act_lang_str =
+        (j_act_lang && cJSON_IsString(j_act_lang) &&
+         j_act_lang->valuestring)
+            ? j_act_lang->valuestring
+            : NULL;
+
+    if (req_id <= 0 || !dev_id_str || !act_lang_str)
+    {
+        OSI_LOGE(TAG,
+                 "[LANG-UPDATE] Invalid acknowledgement fields: "
+                 "request_id=%.0f, deviceId=%s, active_language=%s",
+                 req_id,
+                 dev_id_str ? dev_id_str : "(null)",
+                 act_lang_str ? act_lang_str : "(null)");
+
+        cJSON_Delete(root);
+        return;
+    }
+
+    OSI_LOGI(TAG,
+             "[LANG-UPDATE] Sending acknowledgement: "
+             "request_id=%.0f, deviceId=%s, active_language=%s",
+             req_id, dev_id_str, act_lang_str);
+
+    /*
+     * customer_send_change_language_ack() must POST to:
+     * <Base URL>/TMS/LanguageFile/ChangeLanguageacknowledgement
+     *
+     * Request JSON:
+     * {
+     *   "request_id": 202540563751,
+     *   "deviceId": "00001504QR70W031163",
+     *   "status": " Success ",
+     *   "reason": "",
+     *   "active_language": "1"
+     * }
+     *
+     * Ensure active_language uses the TMS-defined language mapping.
+     */
     customer_send_change_language_ack(
         req_id,
         dev_id_str,
@@ -1074,7 +1250,11 @@ static void template_handle_server_message(const char *topic,
         act_lang_str);
 
     cJSON_Delete(root);
-  }
+
+    OSI_LOGI(TAG,
+             "[LANG-UPDATE] Language command processed (%s)",
+             is_change_def_lang ? "CHANGEDEFLANG" : "legacy");
+}
   /* =========================================================================
    * OPERATION 6: activation
    * ========================================================================= */
@@ -1083,6 +1263,12 @@ static void template_handle_server_message(const char *topic,
     OSI_LOGI(TAG, "[ACTIVATION] Processing activation prompt");
     audio_resource_play_combo_async_mid_priority(
         PAYMENT_AUDIO_FOLDER, "activation-device.mp3", NULL, 1);
+  }
+  else if (strncmp(buf, "DOWNLOADLANG|", 13) == 0)
+  {
+    OSI_LOGI(TAG, "[MQTT-ROUTER] Routing DOWNLOADLANG command: %s", buf);
+    customer_lang_download_handle_mqtt_command(buf);
+    return;
   }
   else if (strstr(topic, "audio-patch") ||
            strncmp(buf, "audio-patch|", 12) == 0)
@@ -1349,6 +1535,12 @@ static void template_mqtt_event_callback(mqtt_event_e event, void *data)
     int ret = framework_mqtt_subscribe(sn, 1);
     OSI_LOGI(TAG, "Subscribe %s: %d", sn, ret);
 
+    if (mqtt_reg.partner_id[0] != '\0')
+    {
+      int ret_partner = framework_mqtt_subscribe(mqtt_reg.partner_id, 1);
+      OSI_LOGI(TAG, "Subscribe PartnerId %s: %d", mqtt_reg.partner_id, ret_partner);
+    }
+
     // Start status reporting after MQTT connection is established (1 min interval)
     OSI_LOGI(TAG, "Starting status report (interval: 1 min / 60 sec)");
     customer_status_report_start(15 * 60);
@@ -1434,6 +1626,12 @@ int customer_mqtt_init(void)
   {
     return 0;
   }
+
+  // Initialize TMS language pack download manager
+  customer_lang_download_init();
+
+  // Initialize secure OTA module
+  customer_app_update_init();
 
   // Initialize status report module
   if (customer_status_report_init() != 0)

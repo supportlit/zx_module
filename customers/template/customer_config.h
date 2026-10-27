@@ -6,12 +6,12 @@
  */
 
 #ifndef __CUSTOMER_CONFIG_H__
-#define __CUSTOMER_CONFIG_H__
+#define __CUSTOMER_CONFIG_H__ 
 
 #define CUSTOMER_NAME "template"
 
 // LCD 功能开关 (1: Enable, 0: Disable)
-#define CUSTOMER_ENABLE_LCD 0
+#define CUSTOMER_ENABLE_LCD 1
 
 #define LED_GREEN_PIN 85
 #define LED_GREEN_PINMUX GPIO_VCXO_REQ
