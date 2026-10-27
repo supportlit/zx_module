@@ -1367,6 +1367,7 @@ void customer_init(void)
 {
     osiExceptionDumpEnable(false);
     customer_audio_download_init();
+    customer_test_init();
     osiSetPMEnableSleep(0); // add by vipin: disable PM sleep so CPU/network stays awake and receives MQTT in real-time
     appLcdInit();           // LCD init
     appLcdenable();         // LCD enable

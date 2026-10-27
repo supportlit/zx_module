@@ -59,6 +59,13 @@
 #define HEARTBEAT_INTERVAL_SEC 60
 
 // ============================================================================
+// TMS Registration Mode (Test vs Normal)
+// 1 = Test Mode   (Runs one-time welcome audio test, response code 9999)
+// 0 = Normal Mode (Skips test, response code 0000, direct MQTT)
+// ============================================================================
+#define TMS_REGISTRATION_TEST_ENABLE 0
+
+// ============================================================================
 // TMS HTTPS Heartbeat Configuration
 // ============================================================================
 #define TMS_HEARTBEAT_ENABLE          1

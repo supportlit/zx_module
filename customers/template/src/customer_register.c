@@ -53,11 +53,225 @@ static const char *s_hardcoded_json_req =
     "\"active_language\":\"1\""
     "}";
 
-/* Optional pipe-separated request body retained for backend compatibility. */
-static const char *s_hardcoded_pipe_resp =
+#define TEST_FILE_PATH     "D:/test.txt"
+#define TEST_FILE_TMP_PATH "D:/test.tmp"
+
+/* Runtime guard to prevent duplicate/concurrent test downloads */
+static bool s_test_download_in_progress = false;
+
+/* Case A: Exact test registration response when TEST_FLAG=0 (code 9999, welcome audio download) */
+static const char *s_test_registration_resp __attribute__((unused)) =
+    "9999|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
+    "b15eeee6-b841-44af-9448-2c58d2cadb11|HPRCEKSPFI|"
+    "0|0|1|https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/new/id_welcome_to_template.mp3|0||1|0|0|0|0|";
+
+/* Case B: Exact normal registration response when TEST_FLAG=1 (code 0000, skip test) */
+static const char *s_normal_registration_resp =
     "0000|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
     "b15eeee6-b841-44af-9448-2c58d2cadb11|HPRCEKSPFI|"
     "0|0|0||0||1|0|0|0|0|";
+
+/**
+ * @brief Read TEST_FLAG value from persistent file "D:/test.txt".
+ * @return 0 if TEST_FLAG=0, 1 if TEST_FLAG=1, -1 if file missing, -2 if unreadable/malformed.
+ */
+static __attribute__((unused)) int customer_test_read_flag(void)
+{
+    int fd = fs_open(TEST_FILE_PATH, "rb");
+    if (fd <= 0)
+    {
+        return -1;
+    }
+
+    char buf[64] = {0};
+    size_t read_bytes = fs_read(buf, 1, sizeof(buf) - 1, fd);
+    fs_close(fd);
+
+    if (read_bytes == 0)
+    {
+        OSI_LOGE(TAG, "[TEST_FLAG] %s is empty", TEST_FILE_PATH);
+        return -2;
+    }
+    buf[read_bytes] = '\0';
+
+    char *ptr = strstr(buf, "TEST_FLAG=");
+    if (!ptr)
+    {
+        OSI_LOGE(TAG, "[TEST_FLAG] Malformed content in %s (missing 'TEST_FLAG='): '%s'",
+                 TEST_FILE_PATH, buf);
+        return -2;
+    }
+
+    ptr += strlen("TEST_FLAG=");
+    while (*ptr == ' ' || *ptr == '\t') ptr++;
+
+    if (*ptr == '0')
+    {
+        OSI_LOGI(TAG, "[TEST_FLAG] Read TEST_FLAG=0 from %s", TEST_FILE_PATH);
+        return 0;
+    }
+    else if (*ptr == '1')
+    {
+        OSI_LOGI(TAG, "[TEST_FLAG] Read TEST_FLAG=1 from %s", TEST_FILE_PATH);
+        return 1;
+    }
+    else
+    {
+        OSI_LOGE(TAG, "[TEST_FLAG] Malformed flag value in %s: '%c'", TEST_FILE_PATH, *ptr);
+        return -2;
+    }
+}
+
+/**
+ * @brief Safely write TEST_FLAG to persistent storage using temp file + atomic rename.
+ * @param val 0 or 1
+ * @return 0 on success, negative error code on failure.
+ */
+static int customer_test_write_flag(int val)
+{
+    char write_buf[32] = {0};
+    snprintf(write_buf, sizeof(write_buf), "TEST_FLAG=%d\r\n", val);
+    size_t write_len = strlen(write_buf);
+
+    fs_remove(TEST_FILE_TMP_PATH);
+    int fd = fs_open(TEST_FILE_TMP_PATH, "wb+");
+    if (fd <= 0)
+    {
+        OSI_LOGW(TAG, "[TEST_FLAG] Cannot open temp file %s (fd=%d), attempting direct write to %s",
+                 TEST_FILE_TMP_PATH, fd, TEST_FILE_PATH);
+        fd = fs_open(TEST_FILE_PATH, "wb+");
+        if (fd <= 0)
+        {
+            OSI_LOGE(TAG, "[TEST_FLAG] Failed to open %s for write (fd=%d)", TEST_FILE_PATH, fd);
+            return -1;
+        }
+        size_t written = fs_write(write_buf, 1, write_len, fd);
+        fs_sync(fd);
+        fs_close(fd);
+        if (written != write_len)
+        {
+            OSI_LOGE(TAG, "[TEST_FLAG] Direct write incomplete (written=%u, expected=%u)",
+                     (unsigned int)written, (unsigned int)write_len);
+            return -2;
+        }
+        OSI_LOGI(TAG, "[TEST_FLAG] Successfully persisted TEST_FLAG=%d directly to %s",
+                 val, TEST_FILE_PATH);
+        return 0;
+    }
+
+    size_t written = fs_write(write_buf, 1, write_len, fd);
+    fs_sync(fd);
+    fs_close(fd);
+
+    if (written != write_len)
+    {
+        OSI_LOGE(TAG, "[TEST_FLAG] Temp write incomplete (written=%u, expected=%u)",
+                 (unsigned int)written, (unsigned int)write_len);
+        fs_remove(TEST_FILE_TMP_PATH);
+        return -2;
+    }
+
+    fs_remove(TEST_FILE_PATH);
+    int ren_ret = fs_rename(TEST_FILE_TMP_PATH, TEST_FILE_PATH);
+    if (ren_ret != 0)
+    {
+        OSI_LOGW(TAG, "[TEST_FLAG] fs_rename failed (%d), writing directly to %s", ren_ret, TEST_FILE_PATH);
+        fd = fs_open(TEST_FILE_PATH, "wb+");
+        if (fd > 0)
+        {
+            fs_write(write_buf, 1, write_len, fd);
+            fs_sync(fd);
+            fs_close(fd);
+            fs_remove(TEST_FILE_TMP_PATH);
+            OSI_LOGI(TAG, "[TEST_FLAG] Successfully persisted TEST_FLAG=%d to %s via fallback",
+                     val, TEST_FILE_PATH);
+            return 0;
+        }
+        OSI_LOGE(TAG, "[TEST_FLAG] Failed to replace %s", TEST_FILE_PATH);
+        return -3;
+    }
+
+    OSI_LOGI(TAG, "[TEST_FLAG] Successfully persisted TEST_FLAG=%d to %s",
+             val, TEST_FILE_PATH);
+    return 0;
+}
+
+/**
+ * @brief Boot initialization of the test flag file.
+ * Creates "D:/test.txt" with TEST_FLAG=0 if it does not exist.
+ * @return 0 if TEST_FLAG is 0, 1 if TEST_FLAG is 1, negative on error.
+ */
+int customer_test_init(void)
+{
+    OSI_LOGI(TAG, "[TEST_FLAG] Boot initialization: Checking %s (Macro TMS_REGISTRATION_TEST_ENABLE=%d)",
+             TEST_FILE_PATH, TMS_REGISTRATION_TEST_ENABLE);
+
+#if defined(TMS_REGISTRATION_TEST_ENABLE) && (TMS_REGISTRATION_TEST_ENABLE == 0)
+    /* Normal Mode configured via macro */
+    OSI_LOGI(TAG, "[TEST_FLAG] TMS_REGISTRATION_TEST_ENABLE is 0: Forcing Normal Mode (TEST_FLAG=1)");
+    customer_test_write_flag(1);
+    return 1;
+#else
+    int flag = customer_test_read_flag();
+    if (flag == -1)
+    {
+        OSI_LOGI(TAG, "[TEST_FLAG] %s not found on boot. Creating with TEST_FLAG=0", TEST_FILE_PATH);
+        int write_res = customer_test_write_flag(0);
+        if (write_res != 0)
+        {
+            OSI_LOGE(TAG, "[TEST_FLAG] Failed to create initial %s (ret=%d)", TEST_FILE_PATH, write_res);
+            return -1;
+        }
+        OSI_LOGI(TAG, "[TEST_FLAG] %s initialized successfully with TEST_FLAG=0", TEST_FILE_PATH);
+        return 0;
+    }
+    else if (flag == 0)
+    {
+        OSI_LOGI(TAG, "[TEST_FLAG] %s exists with TEST_FLAG=0 (test pending)", TEST_FILE_PATH);
+        return 0;
+    }
+    else if (flag == 1)
+    {
+        OSI_LOGI(TAG, "[TEST_FLAG] %s exists with TEST_FLAG=1 (test completed)", TEST_FILE_PATH);
+        return 1;
+    }
+    else
+    {
+        OSI_LOGE(TAG, "[TEST_FLAG] %s unreadable or malformed (err=%d); safely writing TEST_FLAG=0",
+                 TEST_FILE_PATH, flag);
+        customer_test_write_flag(0);
+        return 0;
+    }
+#endif
+}
+
+/**
+ * @brief Get the current test flag value. Never assumes test succeeded if unreadable.
+ * @return 0 (test path) or 1 (normal path).
+ */
+int customer_test_get_flag(void)
+{
+#if defined(TMS_REGISTRATION_TEST_ENABLE) && (TMS_REGISTRATION_TEST_ENABLE == 0)
+    return 1; /* Normal Mode */
+#else
+    int flag = customer_test_read_flag();
+    if (flag < 0)
+    {
+        OSI_LOGE(TAG, "[TEST_FLAG] Read failed (%d); defaulting to TEST_FLAG=0 (never assume test succeeded)", flag);
+        return 0;
+    }
+    return flag;
+#endif
+}
+
+/**
+ * @brief Explicitly reset test flag to 0 for debugging / test restart.
+ */
+void customer_register_clear_test_flag(void)
+{
+    OSI_LOGI(TAG, "[TEST_FLAG] Explicit reset requested; setting TEST_FLAG=0 in %s", TEST_FILE_PATH);
+    customer_test_write_flag(0);
+}
 
 static void trim_whitespace(char *str)
 {
@@ -258,8 +472,26 @@ int tms_register_device_sync(tms_registration_resp_t *out_resp)
     OSI_LOGI(TAG, "HTTP 200 received; response length=%u",
              (unsigned int)strlen(resp_buf));
 
-    const char *data_to_parse = (resp_buf && strlen(resp_buf) > 0) ? resp_buf : s_hardcoded_pipe_resp;
-    ret_status = parse_tms_registration_response(s_hardcoded_pipe_resp, out_resp);
+    const char *selected_resp = NULL;
+#if defined(TMS_REGISTRATION_TEST_ENABLE) && (TMS_REGISTRATION_TEST_ENABLE == 0)
+    OSI_LOGI(TAG, "[REG-SELECT] Macro TMS_REGISTRATION_TEST_ENABLE=0 -> Direct Case B: Normal registration response (code 0000)");
+    selected_resp = s_normal_registration_resp;
+#else
+    int test_flag = customer_test_get_flag();
+    if (test_flag == 1)
+    {
+        OSI_LOGI(TAG, "[REG-SELECT] TEST_FLAG=1 -> Selected Case B: Normal registration response (code 0000)");
+        selected_resp = s_normal_registration_resp;
+    }
+    else
+    {
+        OSI_LOGI(TAG, "[REG-SELECT] TEST_FLAG=%d -> Selected Case A: Test registration response (code 9999, welcome audio download)",
+                 test_flag);
+        selected_resp = s_test_registration_resp;
+    }
+#endif
+
+    ret_status = parse_tms_registration_response(selected_resp, out_resp);
     if (ret_status != 0)
     {
         OSI_LOGE(TAG, "Failed to parse TMS response: %d", ret_status);
@@ -484,14 +716,34 @@ static void prv_bg_reg_check_and_send_ack(void)
 static void prv_reg_welcome_dl_callback(uint32_t msg_id, const char *save_path, void *user_data)
 {
     (void)user_data;
+    s_test_download_in_progress = false;
+
     if (s_bg_reg_mgr.mutex) osiMutexLock(s_bg_reg_mgr.mutex);
     s_bg_reg_mgr.wel_done = true;
     if (msg_id == MSG_HTTP_DOWNLOAD_SUCCESS && fs_size(s_bg_reg_mgr.welcome_dst) > 0) {
-        OSI_LOGI(TAG, "Background WEL download completed successfully: %s (%d bytes)",
-                 save_path ? save_path : "", (int)fs_size(s_bg_reg_mgr.welcome_dst));
+        OSI_LOGI(TAG, "Background WEL download completed successfully: %s (%u bytes)",
+                 save_path ? save_path : "", (unsigned int)fs_size(s_bg_reg_mgr.welcome_dst));
         s_bg_reg_mgr.wel_ok = true;
+
+        /* Verify completed test operation: only persist TEST_FLAG=1 once file is verified on disk */
+        int cur_flag = customer_test_get_flag();
+        if (cur_flag == 0)
+        {
+            OSI_LOGI(TAG, "[TEST_FLAG] Welcome audio verified on disk (%u bytes). Updating TEST_FLAG=1",
+                     (unsigned int)fs_size(s_bg_reg_mgr.welcome_dst));
+            int w_res = customer_test_write_flag(1);
+            if (w_res == 0)
+            {
+                OSI_LOGI(TAG, "[TEST_FLAG] TEST_FLAG=1 persisted successfully. Following boot will use normal response 0000");
+            }
+            else
+            {
+                OSI_LOGE(TAG, "[TEST_FLAG] Failed to persist TEST_FLAG=1 (ret=%d); flag remains 0 for retry", w_res);
+            }
+        }
     } else {
-        OSI_LOGE(TAG, "Background WEL download failed: %s", save_path ? save_path : "");
+        OSI_LOGE(TAG, "Background WEL download failed: msg_id=%u, path=%s, size=%u; keeping TEST_FLAG=0 for retry on next boot",
+                 (unsigned int)msg_id, save_path ? save_path : "", (unsigned int)fs_size(s_bg_reg_mgr.welcome_dst));
         s_bg_reg_mgr.wel_ok = false;
     }
     if (s_bg_reg_mgr.mutex) osiMutexUnlock(s_bg_reg_mgr.mutex);
@@ -504,6 +756,13 @@ static bool customer_register_handle_welcome_download(const tms_registration_res
     if (resp == NULL)
     {
         OSI_LOGE(TAG, "WEL download failed: response structure is NULL");
+        return false;
+    }
+
+    /* Runtime guard to prevent duplicate test download operations */
+    if (s_test_download_in_progress)
+    {
+        OSI_LOGW(TAG, "WEL download already in progress; skipping duplicate trigger");
         return false;
     }
 
@@ -600,6 +859,7 @@ static bool customer_register_handle_welcome_download(const tms_registration_res
 
     OSI_LOGI(TAG, "Queuing background WEL download: %s -> %s", url, dst_copy);
 
+    s_test_download_in_progress = true;
     int download_ret = framework_http_download_file_callback(
         url,
         dst_copy,
@@ -610,6 +870,7 @@ static bool customer_register_handle_welcome_download(const tms_registration_res
 
     if (download_ret != 0)
     {
+        s_test_download_in_progress = false;
         OSI_LOGE(TAG, "WEL download failed: error queuing download (ret=%d)", download_ret);
         if (s_bg_reg_mgr.mutex) osiMutexLock(s_bg_reg_mgr.mutex);
         s_bg_reg_mgr.wel_done = true;
@@ -851,6 +1112,7 @@ void tms_registration_task(void *param)
     (void)param;
 
     OSI_LOGI(TAG, "TMS registration task started");
+    customer_test_init();
 
     for (;;)
     {
