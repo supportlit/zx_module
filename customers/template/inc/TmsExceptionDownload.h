@@ -50,6 +50,9 @@ typedef enum {
  *         TMS_EXCEPTION_DOWNLOAD_SKIPPED if flag != 1,
  *         TMS_EXCEPTION_DOWNLOAD_FAILED if any manifest or download step fails.
  */
+tms_exception_download_status_t tms_exception_download_process_sync(int exception_flag, const char *manifest_url, const char *default_lang, uint32_t timeout_ms);
+typedef void (*tms_exception_completion_cb_t)(tms_exception_download_status_t status, void *user_data);
+void tms_exception_download_set_completion_callback(tms_exception_completion_cb_t cb, void *user_data);
 tms_exception_download_status_t tms_exception_download_process(
     int exception_flag,
     const char *manifest_url,
@@ -80,7 +83,8 @@ int tms_send_update_sb_flag_ack(
     const char *serial_no,
     const char *participant_id,
     const char *wel_status,
-    const char *exe_status
+    const char *exe_status,
+    bool restart_on_completion
 );
 
 /**

@@ -55,6 +55,44 @@ typedef struct
 
 } tms_exception_async_ctx_t;
 
+static osiSemaphore_t *s_exception_sync_sem = NULL;
+static tms_exception_download_status_t s_exception_sync_result = TMS_EXCEPTION_DOWNLOAD_FAILED;
+static tms_exception_completion_cb_t s_exception_user_completion_cb = NULL;
+static void *s_exception_user_completion_data = NULL;
+
+void tms_exception_download_set_completion_callback(tms_exception_completion_cb_t cb, void *user_data)
+{
+    s_exception_user_completion_cb = cb;
+    s_exception_user_completion_data = user_data;
+}
+
+static void prv_notify_exception_completion(tms_exception_download_status_t status)
+{
+    if (s_exception_sync_sem) {
+        s_exception_sync_result = status;
+        osiSemaphoreRelease(s_exception_sync_sem);
+    }
+    if (s_exception_user_completion_cb) {
+        tms_exception_completion_cb_t cb = s_exception_user_completion_cb;
+        void *ud = s_exception_user_completion_data;
+        s_exception_user_completion_cb = NULL;
+        s_exception_user_completion_data = NULL;
+        cb(status, ud);
+    }
+}
+
+static void prv_exception_batch_completion_cb(uint32_t batch_id, int success_count, int failed_count, int total_count, void *user_data)
+{
+    (void)batch_id;
+    (void)user_data;
+    OSI_LOGI(TAG, "[SYNC-EXC] Batch completion callback: success=%d, failed=%d, total=%d",
+             success_count, failed_count, total_count);
+    tms_exception_download_status_t st = (total_count > 0 && failed_count == 0 && success_count == total_count)
+                                          ? TMS_EXCEPTION_DOWNLOAD_SUCCESS
+                                          : TMS_EXCEPTION_DOWNLOAD_FAILED;
+    prv_notify_exception_completion(st);
+}
+
 static void trim_whitespace(char *str)
 
 {
@@ -465,6 +503,10 @@ static void prv_parse_and_queue_gen_manifest(const char *manifest_text, const ch
 
         customer_audio_batch_finish_scheduling(batch_id);
     }
+    else
+    {
+        prv_notify_exception_completion(TMS_EXCEPTION_DOWNLOAD_FAILED);
+    }
 
     free(gen_buf);
 
@@ -487,7 +529,7 @@ static void prv_tms_gen_http_callback(http_response_t *response, void *user_data
 
         !response->response_data || response->response_len == 0)
     {
-
+        prv_notify_exception_completion(TMS_EXCEPTION_DOWNLOAD_FAILED);
         OSI_LOGE(TAG, "[ASYNC-GEN] HTTP GET for GEN.txt failed (status=%d, result=%d)",
 
                  response ? response->status_code : -1,
@@ -529,7 +571,7 @@ static void prv_tms_manifest_http_callback(http_response_t *response, void *user
 
         !response->response_data || response->response_len == 0)
     {
-
+        prv_notify_exception_completion(TMS_EXCEPTION_DOWNLOAD_FAILED);
         OSI_LOGE(TAG, "[ASYNC-MANIFEST] Initial manifest fetch failed (status=%d, result=%d)",
 
                  response ? response->status_code : -1,
@@ -579,7 +621,7 @@ static void prv_tms_manifest_http_callback(http_response_t *response, void *user
 
     if (extract_ret != 0)
     {
-
+        prv_notify_exception_completion(TMS_EXCEPTION_DOWNLOAD_FAILED);
         OSI_LOGE(TAG, "[ASYNC-MANIFEST] Failed to extract GEN.txt URL from response (%d)", extract_ret);
 
         if (ctx)
@@ -594,7 +636,7 @@ static void prv_tms_manifest_http_callback(http_response_t *response, void *user
 
     if (!gen_req)
     {
-
+        prv_notify_exception_completion(TMS_EXCEPTION_DOWNLOAD_FAILED);
         OSI_LOGE(TAG, "[ASYNC-MANIFEST] Failed to allocate memory for GEN request");
 
         if (ctx)
@@ -621,7 +663,7 @@ static void prv_tms_manifest_http_callback(http_response_t *response, void *user
 
     if (q_ret != 0)
     {
-
+        prv_notify_exception_completion(TMS_EXCEPTION_DOWNLOAD_FAILED);
         OSI_LOGE(TAG, "[ASYNC-MANIFEST] Failed to enqueue GEN.txt HTTP request (%d)", q_ret);
 
         if (ctx)
@@ -706,6 +748,8 @@ tms_exception_download_status_t tms_exception_download_process(
         strncpy(ctx->default_lang, "EN", sizeof(ctx->default_lang) - 1);
     }
 
+    customer_audio_batch_set_completion_callback(prv_exception_batch_completion_cb, NULL);
+
     http_request_t *req = (http_request_t *)malloc(sizeof(http_request_t));
 
     if (!req)
@@ -755,6 +799,106 @@ tms_exception_download_status_t tms_exception_download_process(
     return TMS_EXCEPTION_DOWNLOAD_SUCCESS;
 }
 
+tms_exception_download_status_t tms_exception_download_process_sync(
+    int exception_flag,
+    const char *manifest_url,
+    const char *default_lang,
+    uint32_t timeout_ms
+)
+{
+    if (exception_flag != 1)
+    {
+        return TMS_EXCEPTION_DOWNLOAD_SKIPPED;
+    }
+
+    if (!manifest_url || manifest_url[0] == '\0')
+    {
+        return TMS_EXCEPTION_DOWNLOAD_FAILED;
+    }
+
+    if (s_exception_sync_sem)
+    {
+        osiSemaphoreDelete(s_exception_sync_sem);
+        s_exception_sync_sem = NULL;
+    }
+    s_exception_sync_sem = osiSemaphoreCreate(1, 0);
+    s_exception_sync_result = TMS_EXCEPTION_DOWNLOAD_FAILED;
+
+    customer_audio_batch_set_completion_callback(prv_exception_batch_completion_cb, NULL);
+
+    tms_exception_download_status_t ret = tms_exception_download_process(
+        exception_flag,
+        manifest_url,
+        default_lang
+    );
+
+    if (ret != TMS_EXCEPTION_DOWNLOAD_SUCCESS)
+    {
+        if (s_exception_sync_sem)
+        {
+            osiSemaphoreDelete(s_exception_sync_sem);
+            s_exception_sync_sem = NULL;
+        }
+        customer_audio_batch_set_completion_callback(NULL, NULL);
+        return ret;
+    }
+
+    uint32_t wait_ms = (timeout_ms > 0) ? timeout_ms : 60000;
+    OSI_LOGI(TAG, "Waiting for full exception download operation (max %u ms)...", (unsigned)wait_ms);
+    bool ok = osiSemaphoreTryAcquire(s_exception_sync_sem, wait_ms);
+    osiSemaphoreDelete(s_exception_sync_sem);
+    s_exception_sync_sem = NULL;
+    customer_audio_batch_set_completion_callback(NULL, NULL);
+
+    if (!ok)
+    {
+        OSI_LOGE(TAG, "Exception download operation timed out (%u ms)", (unsigned)wait_ms);
+        return TMS_EXCEPTION_DOWNLOAD_FAILED;
+    }
+
+    OSI_LOGI(TAG, "Exception download operation completed with result: %d", (int)s_exception_sync_result);
+    return s_exception_sync_result;
+}
+
+static void prv_tms_delayed_restart_task(void *param)
+{
+    (void)param;
+    OSI_LOGI(TAG, "Device restarting in 2000 ms after download and ACK completion...");
+    osiThreadSleep(2000);
+    osiSysReset();
+    osiThreadExit();
+}
+
+static void prv_tms_trigger_restart(void)
+{
+    OSI_LOGI(TAG, "Spawning restart thread after UPDATESBFLAG ACK...");
+    osiThread_t *t = osiThreadCreate("tms_rst", prv_tms_delayed_restart_task, NULL, 120, 2048);
+    if (!t) {
+        OSI_LOGW(TAG, "Failed to create restart thread, executing inline restart");
+        osiThreadSleep(2000);
+        osiSysReset();
+    }
+}
+
+static void prv_tms_ack_async_callback(http_response_t *response, void *user_data)
+{
+    bool restart = (bool)(uintptr_t)user_data;
+    if (response && response->result == HTTP_RESULT_SUCCESS && response->status_code == 200) {
+        OSI_LOGI(TAG, "UPDATESBFLAG ACK confirmed by server (HTTP 200)");
+    } else {
+        OSI_LOGE(TAG, "UPDATESBFLAG ACK failed (HTTP %d, result=%d)",
+                 response ? response->status_code : -1,
+                 response ? (int)response->result : -1);
+    }
+
+    if (restart) {
+        OSI_LOGI(TAG, "Audio files were updated; initiating device restart");
+        prv_tms_trigger_restart();
+    } else {
+        OSI_LOGI(TAG, "No audio updates requested (flags 0,0); ACK confirmed, skipping restart");
+    }
+}
+
 int tms_send_update_sb_flag_ack(
 
     const char *base_registration_url,
@@ -765,7 +909,9 @@ int tms_send_update_sb_flag_ack(
 
     const char *wel_status,
 
-    const char *exe_status
+    const char *exe_status,
+
+    bool restart_on_completion
 
 )
 
@@ -866,7 +1012,7 @@ int tms_send_update_sb_flag_ack(
 
     /* Use framework_http_post_json so ACK is also non-blocking on the worker queue */
 
-    int ret = framework_http_post_json(ack_url, payload_str, NULL, NULL, NULL);
+    int ret = framework_http_post_json(ack_url, payload_str, NULL, prv_tms_ack_async_callback, (void *)(uintptr_t)restart_on_completion);
 
     cJSON_free(payload_str);
 
@@ -874,6 +1020,7 @@ int tms_send_update_sb_flag_ack(
     {
 
         OSI_LOGE(TAG, "Failed to enqueue UPDATESBFLAG ACK (err=%d)", ret);
+        prv_tms_trigger_restart();
     }
     else
     {

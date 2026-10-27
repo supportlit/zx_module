@@ -31,6 +31,7 @@ typedef enum {
 
 typedef struct {
     osiMutex_t *mutex;
+    osiSemaphore_t *done_sem;
     uint32_t batch_id;
     int total_required;
     int scheduled_count;
@@ -44,6 +45,8 @@ typedef struct {
 
 static audio_batch_tracker_t g_batch_tracker = {0};
 static uint32_t s_batch_counter = 0;
+static customer_audio_batch_completion_cb_t s_batch_completion_cb = NULL;
+static void *s_batch_completion_user_data = NULL;
 
 typedef struct {
     bool restart_after_download;
@@ -120,6 +123,16 @@ static void customer_audio_batch_check_completion_locked(void)
     }
 
     g_batch_tracker.completed = true;
+    if (s_batch_completion_cb) {
+        s_batch_completion_cb(g_batch_tracker.batch_id,
+                              g_batch_tracker.success_count,
+                              g_batch_tracker.failed_count,
+                              g_batch_tracker.total_required,
+                              s_batch_completion_user_data);
+    }
+    if (g_batch_tracker.done_sem) {
+        osiSemaphoreRelease(g_batch_tracker.done_sem);
+    }
     OSI_LOGI(TAG, "[BATCH #%u] Batch completed: total=%d, success=%d, failed=%d",
              g_batch_tracker.batch_id, g_batch_tracker.total_required,
              g_batch_tracker.success_count, g_batch_tracker.failed_count);
@@ -213,6 +226,9 @@ uint32_t customer_audio_batch_start(int total_required)
     g_batch_tracker.failed_count = 0;
     g_batch_tracker.all_scheduled = false;
     g_batch_tracker.completed = false;
+    if (!g_batch_tracker.done_sem) {
+        g_batch_tracker.done_sem = osiSemaphoreCreate(1, 0);
+    }
     g_batch_tracker.restart_requested = false;
     memset(g_batch_tracker.file_status, BATCH_FILE_STATUS_IDLE, sizeof(g_batch_tracker.file_status));
 
@@ -254,6 +270,47 @@ uint32_t customer_audio_batch_get_active_id(void)
     uint32_t id = (!g_batch_tracker.completed) ? g_batch_tracker.batch_id : 0;
     prv_batch_unlock();
     return id;
+}
+
+void customer_audio_batch_set_completion_callback(customer_audio_batch_completion_cb_t cb, void *user_data)
+{
+    prv_batch_lock();
+    s_batch_completion_cb = cb;
+    s_batch_completion_user_data = user_data;
+    prv_batch_unlock();
+}
+
+bool customer_audio_batch_wait_completion(uint32_t batch_id, uint32_t timeout_ms, int *out_success, int *out_failed)
+{
+    prv_batch_lock();
+    if (g_batch_tracker.batch_id != batch_id || batch_id == 0) {
+        prv_batch_unlock();
+        return false;
+    }
+    if (g_batch_tracker.completed) {
+        if (out_success) *out_success = g_batch_tracker.success_count;
+        if (out_failed) *out_failed = g_batch_tracker.failed_count;
+        prv_batch_unlock();
+        return true;
+    }
+    osiSemaphore_t *sem = g_batch_tracker.done_sem;
+    prv_batch_unlock();
+
+    if (!sem) {
+        return false;
+    }
+
+    bool acquired = osiSemaphoreTryAcquire(sem, timeout_ms);
+    if (!acquired) {
+        return false;
+    }
+
+    prv_batch_lock();
+    if (out_success) *out_success = g_batch_tracker.success_count;
+    if (out_failed) *out_failed = g_batch_tracker.failed_count;
+    bool ok = (g_batch_tracker.batch_id == batch_id && g_batch_tracker.completed);
+    prv_batch_unlock();
+    return ok;
 }
 
 static void customer_audio_download_callback(uint32_t msg_id, const char *save_path, void *user_data)

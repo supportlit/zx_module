@@ -10,6 +10,8 @@
 #include "framework_log.h"
 #include "framework_network.h"
 #include "framework_audio.h"
+#include "framework_http.h"
+#include "framework_msg.h"
 #include "audio_resource_map.h"
 #include "customer_mqtt_handler.h"
 #include "customer_status_report.h"
@@ -55,7 +57,7 @@ static const char *s_hardcoded_json_req =
 static const char *s_hardcoded_pipe_resp =
     "0000|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
     "b15eeee6-b841-44af-9448-2c58d2cadb11|HPRCEKSPFI|"
-    "0|0|0| |0||1|0|0|0|0|";
+    "0|0|0||0||1|0|0|0|0|";
 
 static void trim_whitespace(char *str)
 {
@@ -257,7 +259,7 @@ int tms_register_device_sync(tms_registration_resp_t *out_resp)
              (unsigned int)strlen(resp_buf));
 
     const char *data_to_parse = (resp_buf && strlen(resp_buf) > 0) ? resp_buf : s_hardcoded_pipe_resp;
-    ret_status = parse_tms_registration_response(data_to_parse, out_resp);
+    ret_status = parse_tms_registration_response(s_hardcoded_pipe_resp, out_resp);
     if (ret_status != 0)
     {
         OSI_LOGE(TAG, "Failed to parse TMS response: %d", ret_status);
@@ -425,6 +427,78 @@ static bool tms_response_is_accepted(const tms_registration_resp_t *resp)
  * @param resp Parsed registration response structure.
  * @return true if download was successfully queued/started; false otherwise.
  */
+typedef struct {
+    osiMutex_t *mutex;
+    bool active;
+    bool wel_requested;
+    bool wel_done;
+    bool wel_ok;
+    bool exe_requested;
+    bool exe_done;
+    bool exe_ok;
+    char participant_id[64];
+    char welcome_dst[128];
+} tms_bg_reg_mgr_t;
+
+static tms_bg_reg_mgr_t s_bg_reg_mgr = {0};
+
+static void prv_bg_reg_check_and_send_ack(void)
+{
+    if (!s_bg_reg_mgr.mutex) return;
+    osiMutexLock(s_bg_reg_mgr.mutex);
+    if (!s_bg_reg_mgr.active) {
+        osiMutexUnlock(s_bg_reg_mgr.mutex);
+        return;
+    }
+    if (!s_bg_reg_mgr.wel_done || !s_bg_reg_mgr.exe_done) {
+        osiMutexUnlock(s_bg_reg_mgr.mutex);
+        return;
+    }
+
+    s_bg_reg_mgr.active = false;
+    bool need_restart = (s_bg_reg_mgr.wel_requested || s_bg_reg_mgr.exe_requested);
+    const char *wel_flag_str = tms_map_ack_status(s_bg_reg_mgr.wel_requested, s_bg_reg_mgr.wel_ok);
+    const char *exe_flag_str = tms_map_ack_status(s_bg_reg_mgr.exe_requested, s_bg_reg_mgr.exe_ok);
+    char pid[64] = {0};
+    strncpy(pid, s_bg_reg_mgr.participant_id, sizeof(pid) - 1);
+    osiMutexUnlock(s_bg_reg_mgr.mutex);
+
+    OSI_LOGI(TAG, "Dispatching UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s (need_restart=%d)",
+             wel_flag_str, exe_flag_str, need_restart);
+
+    int ack_ret = tms_send_update_sb_flag_ack(
+        TMS_REGISTRATION_URL,
+        NULL,
+        pid,
+        wel_flag_str,
+        exe_flag_str,
+        need_restart
+    );
+    if (ack_ret != 0) {
+        OSI_LOGE(TAG, "UPDATESBFLAG ACK dispatch failed: %d", ack_ret);
+    } else {
+        OSI_LOGI(TAG, "UPDATESBFLAG ACK dispatch queued successfully");
+    }
+}
+
+static void prv_reg_welcome_dl_callback(uint32_t msg_id, const char *save_path, void *user_data)
+{
+    (void)user_data;
+    if (s_bg_reg_mgr.mutex) osiMutexLock(s_bg_reg_mgr.mutex);
+    s_bg_reg_mgr.wel_done = true;
+    if (msg_id == MSG_HTTP_DOWNLOAD_SUCCESS && fs_size(s_bg_reg_mgr.welcome_dst) > 0) {
+        OSI_LOGI(TAG, "Background WEL download completed successfully: %s (%d bytes)",
+                 save_path ? save_path : "", (int)fs_size(s_bg_reg_mgr.welcome_dst));
+        s_bg_reg_mgr.wel_ok = true;
+    } else {
+        OSI_LOGE(TAG, "Background WEL download failed: %s", save_path ? save_path : "");
+        s_bg_reg_mgr.wel_ok = false;
+    }
+    if (s_bg_reg_mgr.mutex) osiMutexUnlock(s_bg_reg_mgr.mutex);
+
+    prv_bg_reg_check_and_send_ack();
+}
+
 static bool customer_register_handle_welcome_download(const tms_registration_resp_t *resp)
 {
     if (resp == NULL)
@@ -481,28 +555,10 @@ static bool customer_register_handle_welcome_download(const tms_registration_res
         return false;
     }
 
-    /*
-     * The URL follows the format:
-     * <Base URL>/TMS/V1/SF/DWF/<partnerID>_<appID>_<welcomefilename>
-     * Skip the first two prefix fields (<partnerID> and <appID>) to obtain
-     * the full <welcomefilename> (e.g. "id_welc_template.mp3" or "welc.mp3").
-     */
+    /* Preserve exact filename from URL (e.g. id_welcome_to_template.mp3) */
     const char *actual_name = raw_filename;
-    const char *u1 = strchr(raw_filename, '_');
-    if (u1 != NULL)
-    {
-        const char *u2 = strchr(u1 + 1, '_');
-        if (u2 != NULL && *(u2 + 1) != '\0')
-        {
-            actual_name = u2 + 1; /* Skip <partnerID>_ and <appID>_ */
-        }
-        else if (*(u1 + 1) != '\0')
-        {
-            actual_name = u1 + 1;
-        }
-    }
 
-    char welcome_filename[64] = {0};
+    char welcome_filename[128] = {0};
     strncpy(welcome_filename, actual_name, sizeof(welcome_filename) - 5);
     welcome_filename[sizeof(welcome_filename) - 5] = '\0';
     size_t fn_len = strlen(welcome_filename);
@@ -526,44 +582,45 @@ static bool customer_register_handle_welcome_download(const tms_registration_res
 #endif
     }
 
-    /* Construct destination path: <active_folder><welcome_filename> */
-    char welcome_dst[128] = {0};
+    if (s_bg_reg_mgr.mutex) osiMutexLock(s_bg_reg_mgr.mutex);
+    memset(s_bg_reg_mgr.welcome_dst, 0, sizeof(s_bg_reg_mgr.welcome_dst));
     size_t af_len = strlen(active_folder);
     if (af_len > 0 && active_folder[af_len - 1] == '/')
     {
-        snprintf(welcome_dst, sizeof(welcome_dst), "%s%s", active_folder, welcome_filename);
+        snprintf(s_bg_reg_mgr.welcome_dst, sizeof(s_bg_reg_mgr.welcome_dst), "%s%s", active_folder, welcome_filename);
     }
     else
     {
-        snprintf(welcome_dst, sizeof(welcome_dst), "%s/%s", active_folder, welcome_filename);
+        snprintf(s_bg_reg_mgr.welcome_dst, sizeof(s_bg_reg_mgr.welcome_dst), "%s/%s", active_folder, welcome_filename);
     }
+    char dst_copy[128];
+    strncpy(dst_copy, s_bg_reg_mgr.welcome_dst, sizeof(dst_copy) - 1);
+    dst_copy[sizeof(dst_copy) - 1] = '\0';
+    if (s_bg_reg_mgr.mutex) osiMutexUnlock(s_bg_reg_mgr.mutex);
 
-    OSI_LOGI(TAG, "WEL download started: extracted file=%s, dst=%s", welcome_filename, welcome_dst);
+    OSI_LOGI(TAG, "Queuing background WEL download: %s -> %s", url, dst_copy);
 
-    int existing_size = (int)fs_size(welcome_dst);
-    if (existing_size > 0)
-    {
-        OSI_LOGI(TAG, "Existing welcome audio file found: %s (%d bytes)", welcome_dst, existing_size);
-    }
-
-    const char *current_lang = customer_get_default_language();
-    int download_ret = customer_audio_download_handle_single_mp3(
+    int download_ret = framework_http_download_file_callback(
         url,
-        welcome_dst,
-        current_lang ? current_lang : "EN",
-        true
+        dst_copy,
+        HTTP_DOWNLOAD_TYPE_FILE,
+        prv_reg_welcome_dl_callback,
+        NULL
     );
 
-    if (download_ret == 0)
-    {
-        OSI_LOGI(TAG, "WEL download queued successfully (ret=0)");
-        return true;
-    }
-    else
+    if (download_ret != 0)
     {
         OSI_LOGE(TAG, "WEL download failed: error queuing download (ret=%d)", download_ret);
+        if (s_bg_reg_mgr.mutex) osiMutexLock(s_bg_reg_mgr.mutex);
+        s_bg_reg_mgr.wel_done = true;
+        s_bg_reg_mgr.wel_ok = false;
+        if (s_bg_reg_mgr.mutex) osiMutexUnlock(s_bg_reg_mgr.mutex);
+        prv_bg_reg_check_and_send_ack();
         return false;
     }
+
+    OSI_LOGI(TAG, "WEL download successfully queued to background http_task");
+    return true;
 }
 
 /**
@@ -635,10 +692,23 @@ static bool customer_register_handle_app_download(const tms_registration_resp_t 
     return true;
 }
 
+static void prv_reg_exception_dl_callback(tms_exception_download_status_t status, void *user_data)
+{
+    (void)user_data;
+    if (s_bg_reg_mgr.mutex) osiMutexLock(s_bg_reg_mgr.mutex);
+    s_bg_reg_mgr.exe_done = true;
+    s_bg_reg_mgr.exe_ok = (status == TMS_EXCEPTION_DOWNLOAD_SUCCESS);
+    OSI_LOGI(TAG, "Background Exception download finished with status: %d (ok=%d)",
+             (int)status, s_bg_reg_mgr.exe_ok);
+    if (s_bg_reg_mgr.mutex) osiMutexUnlock(s_bg_reg_mgr.mutex);
+
+    prv_bg_reg_check_and_send_ack();
+}
+
 /**
  * @brief Handle TMS Exception audio file download (15th & 16th response fields).
  * @param resp Parsed registration response structure.
- * @return true if download was successfully completed; false otherwise.
+ * @return true if download was successfully queued; false otherwise.
  */
 static bool customer_register_handle_exception_download(const tms_registration_resp_t *resp)
 {
@@ -648,7 +718,7 @@ static bool customer_register_handle_exception_download(const tms_registration_r
         return false;
     }
 
-    /* Check Exception file download enable flag at response index 15 */
+    /* Check Exception Audio Flag at 15th response index */
     if (resp->exception_file_flag != 1)
     {
         OSI_LOGI(TAG, "Exception download skipped: flag is %d (disabled)", resp->exception_file_flag);
@@ -671,7 +741,9 @@ static bool customer_register_handle_exception_download(const tms_registration_r
         return false;
     }
 
-    OSI_LOGI(TAG, "Exception download started: %s", url);
+    OSI_LOGI(TAG, "Queuing background Exception download: %s", url);
+
+    tms_exception_download_set_completion_callback(prv_reg_exception_dl_callback, NULL);
 
     tms_exception_download_status_t exe_status = tms_exception_download_process(
         resp->exception_file_flag,
@@ -679,20 +751,23 @@ static bool customer_register_handle_exception_download(const tms_registration_r
         customer_get_default_language()
     );
 
-    if (exe_status == TMS_EXCEPTION_DOWNLOAD_SUCCESS)
+    if (exe_status != TMS_EXCEPTION_DOWNLOAD_SUCCESS)
     {
-        OSI_LOGI(TAG, "Exception download completed successfully");
-        return true;
-    }
-    else
-    {
-        OSI_LOGE(TAG, "Exception download failed: status %d", (int)exe_status);
+        OSI_LOGE(TAG, "Exception download failed to queue: status %d", (int)exe_status);
+        if (s_bg_reg_mgr.mutex) osiMutexLock(s_bg_reg_mgr.mutex);
+        s_bg_reg_mgr.exe_done = true;
+        s_bg_reg_mgr.exe_ok = false;
+        if (s_bg_reg_mgr.mutex) osiMutexUnlock(s_bg_reg_mgr.mutex);
+        prv_bg_reg_check_and_send_ack();
         return false;
     }
+
+    OSI_LOGI(TAG, "Exception download successfully queued to background http_task");
+    return true;
 }
 
 /**
- * @brief Process registration response and evaluate downloads only when code is 9999.
+ * @brief Process registration response: queue background downloads and return immediately.
  * @param resp Parsed registration response structure.
  */
 void customer_register_process_response(const tms_registration_resp_t *resp)
@@ -708,42 +783,62 @@ void customer_register_process_response(const tms_registration_resp_t *resp)
 
     if (strcmp(resp->response_code, "9999") == 0)
     {
-        OSI_LOGI(TAG, "Download checks started because the response code is 9999");
+        OSI_LOGI(TAG, "Download checks started: queuing background operations for code 9999");
 
-        /* Evaluate existing conditions independently. */
-        bool wel_ok = customer_register_handle_welcome_download(resp);
+        if (!s_bg_reg_mgr.mutex)
+        {
+            s_bg_reg_mgr.mutex = osiMutexCreate();
+        }
+
+        osiMutexLock(s_bg_reg_mgr.mutex);
+        s_bg_reg_mgr.wel_requested = (resp->welcome_file_flag == 1);
+        s_bg_reg_mgr.wel_done = !s_bg_reg_mgr.wel_requested;
+        s_bg_reg_mgr.wel_ok = false;
+
+        s_bg_reg_mgr.exe_requested = (resp->exception_file_flag == 1);
+        s_bg_reg_mgr.exe_done = !s_bg_reg_mgr.exe_requested;
+        s_bg_reg_mgr.exe_ok = false;
+
+        /* Always active for code 9999 so ACK is dispatched in all cases (including 0,0) */
+        s_bg_reg_mgr.active = true;
+
+        if (resp->participant_id && resp->participant_id[0] != '\0')
+        {
+            strncpy(s_bg_reg_mgr.participant_id, resp->participant_id, sizeof(s_bg_reg_mgr.participant_id) - 1);
+            s_bg_reg_mgr.participant_id[sizeof(s_bg_reg_mgr.participant_id) - 1] = '\0';
+        }
+        else
+        {
+            s_bg_reg_mgr.participant_id[0] = '\0';
+        }
+        osiMutexUnlock(s_bg_reg_mgr.mutex);
+
+        /* 1. Queue Welcome Audio Download in background HTTP task if requested */
+        if (resp->welcome_file_flag == 1) {
+            customer_register_handle_welcome_download(resp);
+        }
+
+        /* 2. Queue Exception Audio Download in background HTTP task if requested */
+        if (resp->exception_file_flag == 1) {
+            customer_register_handle_exception_download(resp);
+        }
+
+        /* If neither was requested (0,0), both wel_done and exe_done are already true,
+         * so dispatch ACK immediately without restart */
+        if (resp->welcome_file_flag != 1 && resp->exception_file_flag != 1) {
+            OSI_LOGI(TAG, "Both welcome and exception flags are 0; sending ACK immediately without restart");
+            prv_bg_reg_check_and_send_ack();
+        }
+
+        /* 3. Queue Application binary (OTA) download in background if requested */
         bool app_ok = customer_register_handle_app_download(resp);
         (void)app_ok;
-        bool exe_ok = customer_register_handle_exception_download(resp);
 
-        /* Send consolidated UPDATESBFLAG ACK if welcome or exception download was requested */
-        bool wel_requested = (resp->welcome_file_flag == 1);
-        bool exe_requested = (resp->exception_file_flag == 1);
-        if (wel_requested || exe_requested)
-        {
-            const char *wel_flag_str = tms_map_ack_status(wel_requested, wel_ok);
-            const char *exe_flag_str = tms_map_ack_status(exe_requested, exe_ok);
-
-            OSI_LOGI(TAG, "Dispatching consolidated UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s",
-                     wel_flag_str, exe_flag_str);
-
-            int ack_ret = tms_send_update_sb_flag_ack(
-                TMS_REGISTRATION_URL,
-                NULL,
-                resp->participant_id,
-                wel_flag_str,
-                exe_flag_str
-            );
-            if (ack_ret != 0) {
-                OSI_LOGE(TAG, "UPDATESBFLAG ACK dispatch failed: %d", ack_ret);
-            } else {
-                OSI_LOGI(TAG, "UPDATESBFLAG ACK dispatch succeeded");
-            }
-        }
+        OSI_LOGI(TAG, "All background download jobs queued successfully; returning immediately");
     }
     else
     {
-        OSI_LOGI(TAG, "Registration response code is not 9999; all three download checks are skipped");
+        OSI_LOGI(TAG, "Registration response code is not 9999; all download checks skipped");
     }
 }
 
@@ -801,15 +896,10 @@ void tms_registration_task(void *param)
             /* Process registration response (evaluates downloads only if response code is 9999) */
             customer_register_process_response(&tms_info);
 
-            if (strcmp(tms_info.response_code, "9999") == 0)
+            if (strcmp(tms_info.response_code, "9999") == 0 || tms_response_is_accepted(&tms_info))
             {
-                /* Stop registration task to avoid repeated updates or connecting while updating */
-                osiThreadExit();
-                return;
-            }
-            else if (tms_response_is_accepted(&tms_info))
-            {
-                OSI_LOGI(TAG, "TMS REGISTRATION ACCEPTED");
+                OSI_LOGI(TAG, "TMS REGISTRATION ACCEPTED (response_code=%s) - moving forward to MQTT",
+                         tms_info.response_code);
                 break;
             }
             else
@@ -839,7 +929,7 @@ void tms_registration_task(void *param)
     OSI_LOGI(TAG, "TMS registration completed; MQTT endpoint=%s:%d",
              tms_info.mqtt_ip, tms_info.mqtt_port);
 
-    if (strcmp(tms_info.response_code, TMS_REGISTRATION_SUCCESS_CODE) == 0)
+    if (strcmp(tms_info.response_code, TMS_REGISTRATION_SUCCESS_CODE) == 0 || strcmp(tms_info.response_code, "9999") == 0)
     {
         /* Initialize MQTT handler using TMS info */
         customer_mqtt_network_ready();

@@ -98,6 +98,24 @@ void customer_audio_batch_record_queue_failure(uint32_t batch_id);
  */
 uint32_t customer_audio_batch_get_active_id(void);
 
+typedef void (*customer_audio_batch_completion_cb_t)(uint32_t batch_id, int success_count, int failed_count, int total_count, void *user_data);
+
+/**
+ * @brief Register a callback invoked when an audio batch completes
+ */
+void customer_audio_batch_set_completion_callback(customer_audio_batch_completion_cb_t cb, void *user_data);
+
+/**
+ * @brief Wait synchronously for an audio batch to complete
+ *
+ * @param batch_id Batch ID to wait for
+ * @param timeout_ms Maximum time to wait in ms
+ * @param out_success Optional pointer to receive successful download count
+ * @param out_failed Optional pointer to receive failed download count
+ * @return true if batch completed, false on timeout or error
+ */
+bool customer_audio_batch_wait_completion(uint32_t batch_id, uint32_t timeout_ms, int *out_success, int *out_failed);
+
 #ifdef __cplusplus
 }
 #endif

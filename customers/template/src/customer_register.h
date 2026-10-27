@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include "framework_log.h"
-#include "customer_register_test_config.h"
 
 // #define TAG "TMS_PARSE"
 #define TMS_MAX_FIELDS 32
