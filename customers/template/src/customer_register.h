@@ -51,6 +51,7 @@ typedef struct {
 void tms_registration_task(void *param);
 int tms_register_device_sync(tms_registration_resp_t *out_resp);
 void customer_register_process_response(const tms_registration_resp_t *resp);
+void customer_register_handle_lang_download(const tms_registration_resp_t *resp);
 int customer_test_init(void);
 int customer_test_get_flag(void);
 void customer_register_clear_test_flag(void);

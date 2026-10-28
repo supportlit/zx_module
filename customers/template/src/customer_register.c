@@ -22,6 +22,10 @@
 #include "fs_api.h"
 #include "TmsExceptionDownload.h"
 #include "osi_api.h"
+#include "framework_device_config.h"
+#include "soundbox_language.h"
+#include "customer_lang_download.h"
+#include "customer_change_language_ack.h"
 #define MAX_REDIRECT_HOPS 3
 #define TAG "TMS_REG"
 #define TMS_REGISTRATION_URL \
@@ -63,7 +67,7 @@ static bool s_test_download_in_progress = false;
 static const char *s_test_registration_resp __attribute__((unused)) =
     "9999|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
     "b15eeee6-b841-44af-9448-2c58d2cadb11|HPRCEKSPFI|"
-    "0|0|1|https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/new/id_welcome_to_template.mp3|0||1|0|0|0|0|";
+    "0|0|0||0||1|1|0|0|0|";
 
 /* Case B: Exact normal registration response when TEST_FLAG=1 (code 0000, skip test) */
 static const char *s_normal_registration_resp =
@@ -1028,6 +1032,94 @@ static bool customer_register_handle_exception_download(const tms_registration_r
 }
 
 /**
+ * @brief Handle TMS Language Change Workflow per DUX TMS Sound Box API Specification V2.1
+ * @param resp Parsed registration response structure containing fields 19, 20, 21.
+ */
+void customer_register_handle_lang_download(const tms_registration_resp_t *resp)
+{
+    if (resp == NULL)
+    {
+        return;
+    }
+
+    int flag = resp->lang_download_flag;
+    OSI_LOGI(TAG, "[LANG] Language change flag: %d", flag);
+
+    if (flag != 1)
+    {
+        return;
+    }
+
+    char num_str[16] = {0};
+    snprintf(num_str, sizeof(num_str), "%d", resp->lang_numeric_code);
+
+    soundbox_language_t req_lang = SOUNDBOX_DEFAULT_LANGUAGE;
+    bool is_valid = soundbox_str_to_language(num_str, &req_lang);
+
+    soundbox_language_t current_lang = soundbox_get_language();
+    const char *current_lang_str = soundbox_language_to_str(current_lang);
+    const char *requested_lang_str = is_valid ? soundbox_language_to_str(req_lang) : num_str;
+    const char *request_id_str = (resp->change_lang_req_id[0] != '\0') ? resp->change_lang_req_id : "0";
+
+    OSI_LOGI(TAG, "[LANG] Current language: %s", current_lang_str);
+    OSI_LOGI(TAG, "[LANG] Requested language: %s", requested_lang_str);
+    OSI_LOGI(TAG, "[LANG] Request ID: %s", request_id_str);
+
+    char sn[32] = {0};
+    framework_device_config_get_sn(sn, sizeof(sn));
+    double req_id = strtod(request_id_str, NULL);
+
+    /* 1. Validate requested language */
+    if (!is_valid)
+    {
+        OSI_LOGE(TAG, "[LANG] Invalid or unsupported requested language code: %s", num_str);
+        if (req_id > 0)
+        {
+            customer_send_change_language_ack(
+                req_id,
+                sn,
+                "Failed",
+                "Unsupported language code",
+                soundbox_language_to_numeric_str(current_lang));
+        }
+        return;
+    }
+
+    /* 2. Same language - idempotent check (Section 3) */
+    if (current_lang == req_lang)
+    {
+        OSI_LOGI(TAG, "[LANG] Language already active, skipping download");
+        if (req_id > 0)
+        {
+            customer_send_change_language_ack(
+                req_id,
+                sn,
+                " Success ",
+                "",
+                soundbox_language_to_numeric_str(current_lang));
+        }
+        return;
+    }
+
+    /* 3. Different language - directly start the download workflow */
+    OSI_LOGI(TAG, "[LANG] Language mismatch, starting existing DOWNLOADLANG workflow");
+    int dl_ret = customer_lang_download_trigger(request_id_str, NULL);
+    if (dl_ret != 0)
+    {
+        OSI_LOGE(TAG, "[LANG] Failed to trigger language download workflow: %d", dl_ret);
+        if (req_id > 0)
+        {
+            customer_send_change_language_ack(
+                req_id,
+                sn,
+                "Failed",
+                "Language download trigger failed",
+                soundbox_language_to_numeric_str(current_lang));
+        }
+    }
+}
+
+/**
  * @brief Process registration response: queue background downloads and return immediately.
  * @param resp Parsed registration response structure.
  */
@@ -1041,6 +1133,9 @@ void customer_register_process_response(const tms_registration_resp_t *resp)
 
     OSI_LOGI(TAG, "Registration response received");
     OSI_LOGI(TAG, "Registration response code: %s", resp->response_code);
+
+    /* Process TMS Language Change Workflow per DUX TMS Sound Box API Specification V2.1 */
+    customer_register_handle_lang_download(resp);
 
     if (strcmp(resp->response_code, "9999") == 0)
     {

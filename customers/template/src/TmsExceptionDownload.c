@@ -864,8 +864,8 @@ static void prv_tms_delayed_restart_task(void *param)
 {
     (void)param;
     OSI_LOGI(TAG, "Device restarting in 2000 ms after download and ACK completion...");
-    osiThreadSleep(2000);
-    osiSysReset();
+    // osiThreadSleep(2000);
+    // osiSysReset();
     osiThreadExit();
 }
 
@@ -875,8 +875,8 @@ static void prv_tms_trigger_restart(void)
     osiThread_t *t = osiThreadCreate("tms_rst", prv_tms_delayed_restart_task, NULL, 120, 2048);
     if (!t) {
         OSI_LOGW(TAG, "Failed to create restart thread, executing inline restart");
-        osiThreadSleep(2000);
-        osiSysReset();
+        // osiThreadSleep(2000);
+        // osiSysReset();
     }
 }
 

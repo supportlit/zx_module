@@ -86,9 +86,9 @@ static void prv_delayed_restart_task(void *param)
     (void)param;
     OSI_LOGI(TAG, "[AUDIO-DOWNLOAD] Dedicated restart task sleeping 3000 ms before device reset...");
     osiThreadSleep(3000);
-    customer_dux_publish_device_power(0);
-    osiThreadSleep(500);
-    osiSysReset();
+    // customer_dux_publish_device_power(0);
+    // osiThreadSleep(500);
+    // osiSysReset();
     osiThreadExit();
 }
 
@@ -98,10 +98,10 @@ static void prv_trigger_restart(void)
     osiThread_t *t = osiThreadCreate("audio_rst", prv_delayed_restart_task, NULL, 120, 2048);
     if (!t) {
         OSI_LOGW(TAG, "[AUDIO-DOWNLOAD] Failed to create restart thread, executing inline restart sequence");
-        osiThreadSleep(3000);
-        customer_dux_publish_device_power(0);
-        osiThreadSleep(500);
-        osiSysReset();
+        // osiThreadSleep(3000);
+        // customer_dux_publish_device_power(0);
+        // osiThreadSleep(500);
+        // osiSysReset();
     }
 }
 

@@ -5,6 +5,7 @@
 
 #include "customer_lang_download.h"
 #include "customer_language_ack.h"
+#include "customer_change_language_ack.h"
 #include "customer_mqtt_handler.h"
 #include "soundbox_language.h"
 #include "framework_http.h"
@@ -950,7 +951,7 @@ static void prv_tms_lang_worker_task(void *param)
         framework_device_config_get_sn(sn, sizeof(sn));
 
         // 1. Fetch and Parse Metadata
-        int ret = prv_fetch_metadata(url, req_id, meta);
+        int ret = prv_fetch_metadata("https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/language_response.txt", req_id, meta);//pv
         if (ret != 0) {
             OSI_LOGE(TAG, "[WORKFLOW] Metadata retrieval/parsing failed (%d)", ret);
             customer_send_language_ack(
@@ -1062,6 +1063,15 @@ static void prv_tms_lang_worker_task(void *param)
             }
         }
         OSI_LOGI(TAG, "[WORKFLOW] All %d ACKs confirmed sent to TMS server!", meta->zip_count);
+        if (meta->request_id > 0) {
+            customer_send_change_language_ack(
+                meta->request_id,
+                meta->device_id,
+                " Success ",
+                "",
+                soundbox_language_to_numeric_str(new_lang)
+            );
+        }
 
         // 7. Optional upgrade success sound prompt
         if (fs_size("D:/FEMALE/upgrade-success.mp3") > 0 || fs_size("D:/upgrade-success.mp3") > 0) {
@@ -1090,11 +1100,20 @@ static void prv_tms_lang_worker_task(void *param)
         OSI_LOGI(TAG, "==================================================");
         OSI_LOGI(TAG, "[WORKFLOW] All audio files extracted and ACK sent! Restarting device now...");
         OSI_LOGI(TAG, "==================================================");
-        osiThreadSleep(1000);
-        osiSysReset();
+        // osiThreadSleep(1000);
+        // osiSysReset();
         continue;
 
 cleanup_and_idle:
+        if (req_id[0] != '\0' && strtod(req_id, NULL) > 0) {
+            customer_send_change_language_ack(
+                strtod(req_id, NULL),
+                sn,
+                "Failed",
+                "Language download workflow failed",
+                soundbox_language_to_numeric_str(soundbox_get_language())
+            );
+        }
         prv_clean_dir(LANG_TEMP_DIR);
         prv_clean_dir(LANG_STAGING_DIR);
         if (s_mgr.http_response_data) {
