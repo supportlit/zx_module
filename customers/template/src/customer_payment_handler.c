@@ -4,6 +4,7 @@
  */
 
 #include "customer_payment_handler.h"
+#include "customer_campaign.h"
 #include "soundbox_language.h"
 #include "customer_mqtt_handler.h"
 #include "framework_log.h"
@@ -676,6 +677,9 @@ static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audi
             s_pending_amount_str[0] = '\0';
             s_pending_language[0] = '\0';
         }
+
+        /* Trigger active campaign MP3 playback after transaction audio finishes */
+        customer_campaign_on_transaction_completed();
     } else if (status == AUDIO_PLAYBACK_STATUS_ERROR) {
         FRAMEWORK_LOG("[PAYMENT_AUDIO] Playback error: %d", result);
         if (s_pending_txn_id[0] != '\0') {

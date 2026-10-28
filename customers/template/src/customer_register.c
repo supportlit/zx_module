@@ -57,6 +57,27 @@ static const char *s_hardcoded_json_req =
     "\"active_language\":\"1\""
     "}";
 
+static char s_tms_partner_id[64] = {0};
+static char s_tms_app_code[64] = {0};
+
+const char *customer_register_get_partner_id(void)
+{
+    if (s_tms_partner_id[0] != '\0') return s_tms_partner_id;
+    if (mqtt_reg.partner_id[0] != '\0') return mqtt_reg.partner_id;
+    return "b15eeee6-b841-44af-9448-2c58d2cadb11";
+}
+
+const char *customer_register_get_app_code(void)
+{
+    if (s_tms_app_code[0] != '\0') return s_tms_app_code;
+    return "HPRCEKSPFI";
+}
+
+const char *customer_register_get_base_url(void)
+{
+    return "https://1.7.140.58/pos";
+}
+
 #define TEST_FILE_PATH     "D:/test.txt"
 #define TEST_FILE_TMP_PATH "D:/test.tmp"
 
@@ -1134,6 +1155,15 @@ void customer_register_process_response(const tms_registration_resp_t *resp)
     OSI_LOGI(TAG, "Registration response received");
     OSI_LOGI(TAG, "Registration response code: %s", resp->response_code);
 
+    if (resp->participant_id[0] != '\0') {
+        strncpy(s_tms_partner_id, resp->participant_id, sizeof(s_tms_partner_id) - 1);
+        s_tms_partner_id[sizeof(s_tms_partner_id) - 1] = '\0';
+    }
+    if (resp->application_code[0] != '\0') {
+        strncpy(s_tms_app_code, resp->application_code, sizeof(s_tms_app_code) - 1);
+        s_tms_app_code[sizeof(s_tms_app_code) - 1] = '\0';
+    }
+
     /* Process TMS Language Change Workflow per DUX TMS Sound Box API Specification V2.1 */
     customer_register_handle_lang_download(resp);
 
@@ -1240,6 +1270,12 @@ void tms_registration_task(void *param)
             snprintf(mqtt_reg.password, sizeof(mqtt_reg.password), "%s", tms_info.mqtt_pass);
             mqtt_reg.ssl_enable = tms_info.mqtt_ssl_enable;
             snprintf(mqtt_reg.partner_id, sizeof(mqtt_reg.partner_id), "%s", tms_info.participant_id);
+            if (tms_info.participant_id[0] != '\0') {
+                strncpy(s_tms_partner_id, tms_info.participant_id, sizeof(s_tms_partner_id) - 1);
+            }
+            if (tms_info.application_code[0] != '\0') {
+                strncpy(s_tms_app_code, tms_info.application_code, sizeof(s_tms_app_code) - 1);
+            }
             OSI_LOGI(TAG, "Configured mqtt_reg: %s:%d (user=%s, ssl=%d, partner_id=%s)",
                      mqtt_reg.ip, mqtt_reg.port, mqtt_reg.username, mqtt_reg.ssl_enable, mqtt_reg.partner_id);
         } else {

@@ -5,6 +5,7 @@
 #include "customer_language_ack.h"
 #include "customer_change_language_ack.h"
 #include "customer_payment_handler.h"
+#include "customer_campaign.h"
 #include "customer_status_report.h"
 #include "customer_app_update.h"
 #include "customer_audio_download.h"
@@ -1487,18 +1488,47 @@ static void template_handle_server_message(const char *topic,
 
       if (token_count >= 3)
       {
-        const char *lang_str = customer_get_default_language();
+        const char *lang_str = (token_count > 0 && tokens[0][0] != '\0') ? tokens[0] : customer_get_default_language();
         const char *mode = (token_count > 1) ? tokens[1] : "";
         const char *amount_str = (token_count > 2) ? tokens[2] : "0.00";
 
+        const char *raw_campaign = NULL;
         const char *transaction_id = "";
-        for (int i = token_count - 1; i >= 3; i--)
+
+        if (token_count >= 6)
         {
-          if (tokens[i][0] != '\0')
+          /* 6-field standard payload: Lang|Mode|Amount|Campaign|Reserved|TxnID */
+          raw_campaign = tokens[3];
+          transaction_id = (tokens[5][0] != '\0') ? tokens[5] : tokens[token_count - 1];
+        }
+        else if (token_count == 5)
+        {
+          if (strstr(tokens[3], ".mp3") || strstr(tokens[3], "http://") || strstr(tokens[3], "https://"))
           {
-            transaction_id = tokens[i];
-            break;
+            raw_campaign = tokens[3];
+            transaction_id = tokens[4];
           }
+          else
+          {
+            transaction_id = tokens[4];
+          }
+        }
+        else
+        {
+          for (int i = token_count - 1; i >= 3; i--)
+          {
+            if (tokens[i][0] != '\0')
+            {
+              transaction_id = tokens[i];
+              break;
+            }
+          }
+        }
+
+        /* Process Field 4 Campaign if provided */
+        if (raw_campaign != NULL && raw_campaign[0] != '\0')
+        {
+          customer_campaign_process_field(raw_campaign);
         }
 
         double amount_val = atof(amount_str);
@@ -1603,6 +1633,14 @@ static void template_handle_server_message(const char *topic,
       if (!lang_str || lang_str[0] == '\0')
       {
         lang_str = customer_get_default_language();
+      }
+
+      const cJSON *j_campaign = cJSON_GetObjectItem(root, "campaign");
+      if (!j_campaign) j_campaign = cJSON_GetObjectItem(root, "sound_file");
+      if (!j_campaign) j_campaign = cJSON_GetObjectItem(root, "campaign_url");
+      if (j_campaign && cJSON_IsString(j_campaign) && j_campaign->valuestring && j_campaign->valuestring[0] != '\0')
+      {
+        customer_campaign_process_field(j_campaign->valuestring);
       }
 
       const char *status = (j_status && cJSON_IsString(j_status)) ? j_status->valuestring : "";
@@ -1821,6 +1859,7 @@ int customer_mqtt_init(void)
   }
   OSI_LOGI(TAG, "template MQTT handler initialized successfully");
   g_mqtt_initialized = 1;
+  customer_campaign_init();
   return 0;
 }
 
