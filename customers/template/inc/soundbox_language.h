@@ -116,6 +116,18 @@ const char *soundbox_language_name(soundbox_language_t lang);
 bool soundbox_str_to_language(const char *str, soundbox_language_t *out_lang);
 
 /**
+ * @brief Validate that the required welcome audio resource exists for the given language
+ *
+ * Checks for existence of welcome audio resource in the language's audio folder.
+ * Validates 'wel' (file or non-empty directory), 'wel.mp3', 'wel.wav', 'welcome.mp3',
+ * or canonical startup welcome audio ('id_welcome_to_template.mp3').
+ *
+ * @param lang Language enum to validate
+ * @return true if valid welcome audio resource exists and is accessible, false otherwise
+ */
+bool soundbox_validate_welcome_audio(soundbox_language_t lang);
+
+/**
  * @brief Initialize language subsystem on Soundbox startup
  */
 void soundbox_language_init(void);

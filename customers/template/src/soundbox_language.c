@@ -3,18 +3,20 @@
  * @brief Soundbox Language Loading, Tracking, and Audio Folder Mapping
  */
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdbool.h>
+
 #include "soundbox_language.h"
+#include "audio_resource_map.h"
 #include "framework_audio.h"
 #include "framework_log.h"
 #include "fs_api.h"
 #include "cJSON.h"
 #include "osi_api.h"
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
-#include <stdbool.h>
 
 #define TAG "SB_LANG"
 
@@ -471,3 +473,160 @@ void soundbox_language_init(void)
 
     prv_lang_unlock();
 }
+
+static bool prv_is_valid_audio_file(const char *path)
+{
+    if (!path || path[0] == '\0') {
+        return false;
+    }
+
+    FileStat_t st;
+    memset(&st, 0, sizeof(st));
+    if (fs_stat(path, &st) == 0) {
+        if (st.file_type == 1) {
+            /* Directory is not an audio file */
+            return false;
+        }
+        if (st.file_size == 0) {
+            /* Empty or dummy audio file */
+            return false;
+        }
+    }
+
+    uint32_t sz = fs_size(path);
+    if (sz == 0) {
+        return false;
+    }
+
+    /* Verify file is accessible by opening it */
+    int fd = fs_open(path, "rb");
+    if (fd < 0) {
+        return false;
+    }
+    fs_close(fd);
+    return true;
+}
+
+static bool prv_dir_has_valid_audio(const char *dir_path)
+{
+    if (!dir_path || dir_path[0] == '\0') {
+        return false;
+    }
+
+    uint32_t dir_handle = fs_opendir(dir_path);
+    if (!dir_handle) {
+        return false;
+    }
+
+    DirFileInfo_t file_info;
+    bool found = false;
+    while (fs_readdir((int)dir_handle, &file_info) == 1) {
+        if (file_info.file_name[0] == '\0' ||
+            strcmp(file_info.file_name, ".") == 0 ||
+            strcmp(file_info.file_name, "..") == 0) {
+            continue;
+        }
+        if (file_info.size > 0) {
+            const char *dot = strrchr(file_info.file_name, '.');
+            if (dot && (strcasecmp(dot, ".mp3") == 0 || strcasecmp(dot, ".wav") == 0)) {
+                char full_item[320];
+                snprintf(full_item, sizeof(full_item), "%s/%s", dir_path, file_info.file_name);
+                if (fs_size(full_item) > 0) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    fs_closedir((int)dir_handle);
+    return found;
+}
+
+bool soundbox_validate_welcome_audio(soundbox_language_t lang)
+{
+    const char *folder = soundbox_get_audio_folder(lang);
+    if (!folder || folder[0] == '\0') {
+        OSI_LOGE(TAG, "[LANG-CHECK] Language enum %d has no audio folder configured", (int)lang);
+        return false;
+    }
+
+    char clean_folder[64] = {0};
+    strncpy(clean_folder, folder, sizeof(clean_folder) - 2);
+    size_t flen = strlen(clean_folder);
+    if (flen > 0 && clean_folder[flen - 1] != '/' && clean_folder[flen - 1] != '\\') {
+        clean_folder[flen] = '/';
+        clean_folder[flen + 1] = '\0';
+    }
+
+    /* 1. Check direct welcome path: <folder>/wel (e.g. D:/HI/wel) */
+    char path_wel[128];
+    snprintf(path_wel, sizeof(path_wel), "%swel", clean_folder);
+
+    FileStat_t st;
+    memset(&st, 0, sizeof(st));
+    if (fs_stat(path_wel, &st) == 0) {
+        if (st.file_type == 1) {
+            /* wel is a directory - verify it contains a valid non-empty audio file */
+            if (prv_dir_has_valid_audio(path_wel)) {
+                OSI_LOGI(TAG, "[LANG-CHECK] Valid welcome audio found in directory: %s", path_wel);
+                return true;
+            }
+            OSI_LOGW(TAG, "[LANG-CHECK] Directory %s exists but contains no valid audio files", path_wel);
+        } else if (st.file_type == 0 && st.file_size > 0) {
+            if (prv_is_valid_audio_file(path_wel)) {
+                OSI_LOGI(TAG, "[LANG-CHECK] Valid welcome audio file found: %s (%u bytes)",
+                         path_wel, (unsigned int)st.file_size);
+                return true;
+            }
+        }
+    } else {
+        /* Fallback if fs_stat returned non-zero: check if fs_opendir or fs_size works */
+        uint32_t dir_h = fs_opendir(path_wel);
+        if (dir_h != 0) {
+            fs_closedir((int)dir_h);
+            if (prv_dir_has_valid_audio(path_wel)) {
+                OSI_LOGI(TAG, "[LANG-CHECK] Valid welcome audio found in directory: %s", path_wel);
+                return true;
+            }
+        } else if (prv_is_valid_audio_file(path_wel)) {
+            OSI_LOGI(TAG, "[LANG-CHECK] Valid welcome audio file found: %s (%u bytes)",
+                     path_wel, (unsigned int)fs_size(path_wel));
+            return true;
+        }
+    }
+
+    /* 2. Check base filename variations and standard welcome files */
+    static const char *const candidates[] = {
+        "wel.mp3",
+        "wel.wav",
+        "welcome.mp3",
+        "id_welcome_to_template.mp3",
+        "wel/id_welcome_to_template.mp3"
+    };
+
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        char cand_path[128];
+        snprintf(cand_path, sizeof(cand_path), "%s%s", clean_folder, candidates[i]);
+        if (prv_is_valid_audio_file(cand_path)) {
+            OSI_LOGI(TAG, "[LANG-CHECK] Valid welcome audio resource found: %s (%u bytes)",
+                     cand_path, (unsigned int)fs_size(cand_path));
+            return true;
+        }
+    }
+
+    /* 3. Check customer startup audio map from audio_resource_map.h if configured */
+    const char *startup_fname = customer_audio_get_path(AUDIO_RES_SYS_STARTUP);
+    if (startup_fname && startup_fname[0] != '\0') {
+        char map_path[128];
+        snprintf(map_path, sizeof(map_path), "%s%s", clean_folder, startup_fname);
+        if (prv_is_valid_audio_file(map_path)) {
+            OSI_LOGI(TAG, "[LANG-CHECK] Valid system startup audio resource found: %s (%u bytes)",
+                     map_path, (unsigned int)fs_size(map_path));
+            return true;
+        }
+    }
+
+    OSI_LOGW(TAG, "[LANG-CHECK] Required welcome audio resource missing in folder: %s", clean_folder);
+    return false;
+}
+
