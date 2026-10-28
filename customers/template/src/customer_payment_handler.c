@@ -566,9 +566,11 @@ static void prv_lcd_rotate_work_callback(void *param)
     }
 
     // Schedule next 5-second rotation
+#if (CUSTOMER_LCD_ROTATE_IDLE_SCREENS == 1)
     if (!s_is_payment_active && s_lcd_rotate_timer != NULL) {
         osiTimerStart(s_lcd_rotate_timer, 5000);
     }
+#endif
 }
 
 static void prv_lcd_rotate_timer_callback(void *param)
@@ -591,10 +593,12 @@ static void prv_lcd_rotate_timer_callback(void *param)
 static void prv_lcd_idle_work_callback(void *param)
 {
     (void)param;
-    FRAMEWORK_LOG("LCD 10s payment timeout reached, resuming rotating idle screens");
     s_is_payment_active = false;
-    s_lcd_rotate_stage = LCD_ROTATE_TIME; // We display HITACHI now, next 5s rotation is TIME
     appLcdShowTextHitachi();
+
+#if (CUSTOMER_LCD_ROTATE_IDLE_SCREENS == 1)
+    FRAMEWORK_LOG("LCD 10s payment timeout reached, resuming rotating idle screens");
+    s_lcd_rotate_stage = LCD_ROTATE_TIME; // We display HITACHI now, next 5s rotation is TIME
 
     // Start 5s rotation from HITACHI -> TIME -> DATE
     if (s_lcd_rotate_timer == NULL) {
@@ -604,6 +608,9 @@ static void prv_lcd_idle_work_callback(void *param)
         osiTimerStop(s_lcd_rotate_timer);
         osiTimerStart(s_lcd_rotate_timer, 5000);
     }
+#else
+    FRAMEWORK_LOG("LCD 10s payment timeout reached, showing HITACHI idle screen (rotation disabled)");
+#endif
 }
 
 static void prv_lcd_idle_timer_callback(void *param)
@@ -622,10 +629,12 @@ static void prv_lcd_idle_timer_callback(void *param)
 
 void customer_lcd_start_rotating_idle(void)
 {
-    FRAMEWORK_LOG("Starting 5s rotating idle screen (HITACHI -> TIME -> DATE)");
     s_is_payment_active = false;
-    s_lcd_rotate_stage = LCD_ROTATE_TIME; // After initial HITACHI, next is TIME
     appLcdShowTextHitachi();
+
+#if (CUSTOMER_LCD_ROTATE_IDLE_SCREENS == 1)
+    FRAMEWORK_LOG("Starting 5s rotating idle screen (HITACHI -> TIME -> DATE)");
+    s_lcd_rotate_stage = LCD_ROTATE_TIME; // After initial HITACHI, next is TIME
 
     if (s_lcd_rotate_timer == NULL) {
         s_lcd_rotate_timer = osiTimerCreate(prv_lcd_rotate_timer_callback, NULL);
@@ -634,6 +643,9 @@ void customer_lcd_start_rotating_idle(void)
         osiTimerStop(s_lcd_rotate_timer);
         osiTimerStart(s_lcd_rotate_timer, 5000);
     }
+#else
+    FRAMEWORK_LOG("Starting static idle screen: HITACHI only (rotation disabled)");
+#endif
 }
 
 void customer_lcd_stop_rotating_idle(void)

@@ -10,6 +10,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifndef CUSTOMER_LCD_ROTATE_IDLE_SCREENS
+#define CUSTOMER_LCD_ROTATE_IDLE_SCREENS 0 // 1 = Rotate idle screens (HITACHI -> TIME -> DATE), 0 = Static HITACHI only
+#endif
+
 #define PAYMENT_AUDIO_FOLDER ""
 typedef struct {
     uint64_t amount;        // Legacy field / integer rupees
