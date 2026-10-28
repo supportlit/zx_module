@@ -86,9 +86,9 @@ static bool s_test_download_in_progress = false;
 
 /* Case A: Exact test registration response when TEST_FLAG=0 (code 9999, welcome audio download) */
 static const char *s_test_registration_resp __attribute__((unused)) =
-    "9999|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
+    "0000|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
     "b15eeee6-b841-44af-9448-2c58d2cadb11|HPRCEKSPFI|"
-    "0|0|0||0||1|1|0|0|0|";
+    "0|0|1|https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/new/id_welcome_to_template.mp3|0||1|1|0|0|0|";
 
 /* Case B: Exact normal registration response when TEST_FLAG=1 (code 0000, skip test) */
 static const char *s_normal_registration_resp =
@@ -713,15 +713,15 @@ static void prv_bg_reg_check_and_send_ack(void)
     }
 
     s_bg_reg_mgr.active = false;
-    bool need_restart = (s_bg_reg_mgr.wel_requested || s_bg_reg_mgr.exe_requested);
+    bool need_restart = false; /* Continue normal operations without rebooting */
     const char *wel_flag_str = tms_map_ack_status(s_bg_reg_mgr.wel_requested, s_bg_reg_mgr.wel_ok);
     const char *exe_flag_str = tms_map_ack_status(s_bg_reg_mgr.exe_requested, s_bg_reg_mgr.exe_ok);
     char pid[64] = {0};
     strncpy(pid, s_bg_reg_mgr.participant_id, sizeof(pid) - 1);
     osiMutexUnlock(s_bg_reg_mgr.mutex);
 
-    OSI_LOGI(TAG, "Dispatching UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s (need_restart=%d)",
-             wel_flag_str, exe_flag_str, need_restart);
+    OSI_LOGI(TAG, "Dispatching UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s (continuing normal operations)",
+             wel_flag_str, exe_flag_str);
 
     int ack_ret = tms_send_update_sb_flag_ack(
         TMS_REGISTRATION_URL,
@@ -1164,67 +1164,92 @@ void customer_register_process_response(const tms_registration_resp_t *resp)
         s_tms_app_code[sizeof(s_tms_app_code) - 1] = '\0';
     }
 
-    /* Process TMS Language Change Workflow per DUX TMS Sound Box API Specification V2.1 */
-    customer_register_handle_lang_download(resp);
-
-    if (strcmp(resp->response_code, "9999") == 0)
+    /* =========================================================================
+     * 1. Verify Welcome Audio and Section 8 Soundbox Exception File Download:
+     *    Checked on registration response. If flag == 1, queue background download
+     *    and continue normal operations.
+     * ========================================================================= */
+    if (!s_bg_reg_mgr.mutex)
     {
-        OSI_LOGI(TAG, "Download checks started: queuing background operations for code 9999");
+        s_bg_reg_mgr.mutex = osiMutexCreate();
+    }
 
-        if (!s_bg_reg_mgr.mutex)
-        {
-            s_bg_reg_mgr.mutex = osiMutexCreate();
-        }
+    osiMutexLock(s_bg_reg_mgr.mutex);
+    s_bg_reg_mgr.wel_requested = (resp->welcome_file_flag == 1);
+    s_bg_reg_mgr.wel_done = !s_bg_reg_mgr.wel_requested;
+    s_bg_reg_mgr.wel_ok = false;
 
-        osiMutexLock(s_bg_reg_mgr.mutex);
-        s_bg_reg_mgr.wel_requested = (resp->welcome_file_flag == 1);
-        s_bg_reg_mgr.wel_done = !s_bg_reg_mgr.wel_requested;
-        s_bg_reg_mgr.wel_ok = false;
+    s_bg_reg_mgr.exe_requested = (resp->exception_file_flag == 1);
+    s_bg_reg_mgr.exe_done = !s_bg_reg_mgr.exe_requested;
+    s_bg_reg_mgr.exe_ok = false;
 
-        s_bg_reg_mgr.exe_requested = (resp->exception_file_flag == 1);
-        s_bg_reg_mgr.exe_done = !s_bg_reg_mgr.exe_requested;
-        s_bg_reg_mgr.exe_ok = false;
+    s_bg_reg_mgr.active = true;
 
-        /* Always active for code 9999 so ACK is dispatched in all cases (including 0,0) */
-        s_bg_reg_mgr.active = true;
-
-        if (resp->participant_id && resp->participant_id[0] != '\0')
-        {
-            strncpy(s_bg_reg_mgr.participant_id, resp->participant_id, sizeof(s_bg_reg_mgr.participant_id) - 1);
-            s_bg_reg_mgr.participant_id[sizeof(s_bg_reg_mgr.participant_id) - 1] = '\0';
-        }
-        else
-        {
-            s_bg_reg_mgr.participant_id[0] = '\0';
-        }
-        osiMutexUnlock(s_bg_reg_mgr.mutex);
-
-        /* 1. Queue Welcome Audio Download in background HTTP task if requested */
-        if (resp->welcome_file_flag == 1) {
-            customer_register_handle_welcome_download(resp);
-        }
-
-        /* 2. Queue Exception Audio Download in background HTTP task if requested */
-        if (resp->exception_file_flag == 1) {
-            customer_register_handle_exception_download(resp);
-        }
-
-        /* If neither was requested (0,0), both wel_done and exe_done are already true,
-         * so dispatch ACK immediately without restart */
-        if (resp->welcome_file_flag != 1 && resp->exception_file_flag != 1) {
-            OSI_LOGI(TAG, "Both welcome and exception flags are 0; sending ACK immediately without restart");
-            prv_bg_reg_check_and_send_ack();
-        }
-
-        /* 3. Queue Application binary (OTA) download in background if requested */
-        bool app_ok = customer_register_handle_app_download(resp);
-        (void)app_ok;
-
-        OSI_LOGI(TAG, "All background download jobs queued successfully; returning immediately");
+    if (resp->participant_id && resp->participant_id[0] != '\0')
+    {
+        strncpy(s_bg_reg_mgr.participant_id, resp->participant_id, sizeof(s_bg_reg_mgr.participant_id) - 1);
+        s_bg_reg_mgr.participant_id[sizeof(s_bg_reg_mgr.participant_id) - 1] = '\0';
     }
     else
     {
-        OSI_LOGI(TAG, "Registration response code is not 9999; all download checks skipped");
+        s_bg_reg_mgr.participant_id[0] = '\0';
+    }
+    osiMutexUnlock(s_bg_reg_mgr.mutex);
+
+    /* Queue Welcome Audio Download in background HTTP task if requested (13th index == 1) */
+    if (resp->welcome_file_flag == 1)
+    {
+        OSI_LOGI(TAG, "Welcome file flag is 1: queuing welcome audio download");
+        customer_register_handle_welcome_download(resp);
+    }
+    else
+    {
+        OSI_LOGI(TAG, "Welcome file flag is %d: skipping welcome audio download", resp->welcome_file_flag);
+    }
+
+    /* Queue Section 8 Exception File Download in background HTTP task if requested (15th index == 1) */
+    if (resp->exception_file_flag == 1)
+    {
+        OSI_LOGI(TAG, "Exception file flag is 1 (Section 8 Exception API): queuing exception download");
+        customer_register_handle_exception_download(resp);
+    }
+    else
+    {
+        OSI_LOGI(TAG, "Exception file flag is %d: skipping exception download", resp->exception_file_flag);
+    }
+
+    /* If neither was requested (0,0), both wel_done and exe_done are already true; send ACK immediately */
+    if (resp->welcome_file_flag != 1 && resp->exception_file_flag != 1)
+    {
+        OSI_LOGI(TAG, "Both welcome and exception flags are not 1; sending ACK immediately");
+        prv_bg_reg_check_and_send_ack();
+    }
+
+    /* =========================================================================
+     * 2. App Update URL & Language Download: ONLY if response code is 9999
+     * ========================================================================= */
+    if (strcmp(resp->response_code, "9999") == 0)
+    {
+        OSI_LOGI(TAG, "[9999] Registration response code is 9999: checking App update URL and Language download");
+
+        /* Check App update URL (8th response field: app_download_url) */
+        if (resp->app_download_url[0] != '\0')
+        {
+            OSI_LOGI(TAG, "[9999] App update URL found: %s", resp->app_download_url);
+            customer_register_handle_app_download(resp);
+        }
+        else
+        {
+            OSI_LOGI(TAG, "[9999] App update URL is empty, skipping app update");
+        }
+
+        /* Check Language download workflow (19th, 20th, 21st response fields) */
+        customer_register_handle_lang_download(resp);
+    }
+    else
+    {
+        OSI_LOGI(TAG, "Registration response code '%s' is not 9999; skipping App update and Language download",
+                 resp->response_code);
     }
 }
 
