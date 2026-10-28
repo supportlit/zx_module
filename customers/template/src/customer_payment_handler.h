@@ -8,6 +8,7 @@
 
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #define PAYMENT_AUDIO_FOLDER ""
 typedef struct {
@@ -19,6 +20,7 @@ typedef struct {
     char transaction_id[64]; // Transaction ID for completion ACK
     char amount_str[16];     // add by vipin: Amount string for ACK (e.g. "16.32")
     char language[16];       // add by vipin: Language for ACK & audio resolution (e.g. "HI", "EN")
+    bool has_campaign;       // true if transaction specified a non-empty campaign field
 } payment_broadcast_params_t;
 
 int customer_payment_broadcast(const payment_broadcast_params_t *params);

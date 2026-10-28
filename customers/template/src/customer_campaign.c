@@ -26,6 +26,7 @@
 static char s_active_campaign_name[64] = {0};
 static char s_pending_target_name[64] = {0};
 static bool s_campaign_downloading = false;
+static bool s_campaign_playback_requested = false;
 static osiMutex_t *s_campaign_mutex = NULL;
 
 /* ============================================================================
@@ -87,6 +88,50 @@ static int prv_file_copy(const char *src, const char *dst)
     fs_close(in_fd);
     fs_close(out_fd);
     return 0;
+}
+
+static void prv_save_campaign_info(const char *name)
+{
+    if (!name || name[0] == '\0')
+    {
+        return;
+    }
+    int fd = fs_open(CAMPAIGN_INFO_FILE_PATH, "wb+");
+    if (fd >= 0)
+    {
+        fs_write((void *)name, 1, strlen(name), fd);
+        fs_close(fd);
+        OSI_LOGI(TAG, "[CAMPAIGN] Saved active campaign info: %s -> %s", name, CAMPAIGN_INFO_FILE_PATH);
+    }
+    else
+    {
+        OSI_LOGE(TAG, "[CAMPAIGN] Failed to open %s for writing", CAMPAIGN_INFO_FILE_PATH);
+    }
+}
+
+static void prv_load_campaign_info(char *name, size_t max_len)
+{
+    if (!name || max_len == 0)
+    {
+        return;
+    }
+    name[0] = '\0';
+    if (fs_size(CAMPAIGN_INFO_FILE_PATH) == 0)
+    {
+        return;
+    }
+    int fd = fs_open(CAMPAIGN_INFO_FILE_PATH, "rb");
+    if (fd >= 0)
+    {
+        int r = fs_read((void *)name, 1, max_len - 1, fd);
+        fs_close(fd);
+        if (r > 0)
+        {
+            name[r] = '\0';
+            prv_trim(name);
+            OSI_LOGI(TAG, "[CAMPAIGN] Loaded persisted campaign info: %s from %s", name, CAMPAIGN_INFO_FILE_PATH);
+        }
+    }
 }
 
 /**
@@ -199,6 +244,10 @@ static void prv_campaign_download_cb(uint32_t msg_id, const char *save_path, voi
 
         strncpy(s_active_campaign_name, s_pending_target_name, sizeof(s_active_campaign_name) - 1);
         s_active_campaign_name[sizeof(s_active_campaign_name) - 1] = '\0';
+
+        /* Persist campaign info in text file so after restart it will not download again */
+        prv_save_campaign_info(s_active_campaign_name);
+
         OSI_LOGI(TAG, "[CAMPAIGN] Activated new campaign file: %s (%s)",
                  s_active_campaign_name, CAMPAIGN_ACTIVE_FILE_PATH);
     }
@@ -223,6 +272,16 @@ void customer_campaign_init(void)
     {
         OSI_LOGI(TAG, "[CAMPAIGN] Active campaign file present on disk (%u bytes)",
                  (unsigned int)fs_size(CAMPAIGN_ACTIVE_FILE_PATH));
+        prv_load_campaign_info(s_active_campaign_name, sizeof(s_active_campaign_name));
+        if (s_active_campaign_name[0] != '\0')
+        {
+            OSI_LOGI(TAG, "[CAMPAIGN] Active campaign restored: %s", s_active_campaign_name);
+        }
+    }
+    else
+    {
+        fs_remove(CAMPAIGN_INFO_FILE_PATH);
+        s_active_campaign_name[0] = '\0';
     }
     prv_campaign_unlock();
 }
@@ -237,8 +296,34 @@ const char *customer_campaign_get_active_name(void)
     return s_active_campaign_name;
 }
 
+void customer_campaign_set_playback_requested(bool requested)
+{
+    prv_campaign_lock();
+    s_campaign_playback_requested = requested;
+    prv_campaign_unlock();
+}
+
+bool customer_campaign_is_playback_requested(void)
+{
+    prv_campaign_lock();
+    bool req = s_campaign_playback_requested;
+    prv_campaign_unlock();
+    return req;
+}
+
 int customer_campaign_on_transaction_completed(void)
 {
+    prv_campaign_lock();
+    bool req = s_campaign_playback_requested;
+    s_campaign_playback_requested = false;
+    prv_campaign_unlock();
+
+    if (!req)
+    {
+        OSI_LOGI(TAG, "[CAMPAIGN] Campaign field empty in transaction, normal playback only");
+        return 0;
+    }
+
     if (fs_size(CAMPAIGN_ACTIVE_FILE_PATH) > 0)
     {
         OSI_LOGI(TAG, "[CAMPAIGN] Starting post-transaction playback");
@@ -253,16 +338,25 @@ int customer_campaign_process_field(const char *field4)
 
     if (!field4)
     {
+        prv_campaign_lock();
+        s_campaign_playback_requested = false;
+        prv_campaign_unlock();
         return 0;
     }
 
     size_t in_len = strlen(field4);
     if (in_len == 0)
     {
+        prv_campaign_lock();
+        s_campaign_playback_requested = false;
+        prv_campaign_unlock();
         return 0;
     }
     if (in_len >= CAMPAIGN_MAX_VAL_LEN)
     {
+        prv_campaign_lock();
+        s_campaign_playback_requested = false;
+        prv_campaign_unlock();
         OSI_LOGE(TAG, "[CAMPAIGN] Invalid input or download failure");
         return -1;
     }
@@ -274,6 +368,9 @@ int customer_campaign_process_field(const char *field4)
     if (!trimmed || trimmed[0] == '\0')
     {
         /* Empty fourth field - reject/skip safely without disrupting transaction */
+        prv_campaign_lock();
+        s_campaign_playback_requested = false;
+        prv_campaign_unlock();
         return 0;
     }
 
@@ -356,11 +453,13 @@ int customer_campaign_process_field(const char *field4)
     }
 
     prv_campaign_lock();
+    s_campaign_playback_requested = true;
 
     /* Avoid downloading the same valid campaign repeatedly */
     if (strcmp(s_active_campaign_name, basename) == 0 && fs_size(CAMPAIGN_ACTIVE_FILE_PATH) > 0)
     {
         prv_campaign_unlock();
+        OSI_LOGI(TAG, "[CAMPAIGN] Campaign already active (%s), skipping duplicate download", s_active_campaign_name);
         return 0;
     }
 

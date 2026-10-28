@@ -1525,10 +1525,23 @@ static void template_handle_server_message(const char *topic,
           }
         }
 
-        /* Process Field 4 Campaign if provided */
+        /* Process Field 4 Campaign if provided and not empty */
+        bool has_campaign = false;
         if (raw_campaign != NULL && raw_campaign[0] != '\0')
         {
-          customer_campaign_process_field(raw_campaign);
+          char camp_copy[128] = {0};
+          strncpy(camp_copy, raw_campaign, sizeof(camp_copy) - 1);
+          char *trimmed_camp = prv_str_trim(camp_copy);
+          if (trimmed_camp != NULL && trimmed_camp[0] != '\0')
+          {
+            has_campaign = true;
+            customer_campaign_process_field(trimmed_camp);
+          }
+        }
+
+        if (!has_campaign)
+        {
+          customer_campaign_set_playback_requested(false);
         }
 
         double amount_val = atof(amount_str);
@@ -1541,15 +1554,16 @@ static void template_handle_server_message(const char *topic,
         }
 
         OSI_LOGI(TAG,
-                 "[PIPE-PAYMENT] lang=%s, mode=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), txn_id=%s",
+                 "[PIPE-PAYMENT] lang=%s, mode=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), txn_id=%s, has_campaign=%d",
                  lang_str, mode, amount_str, amount_val,
-                 (unsigned long long)rupees, (unsigned long)paise, transaction_id);
+                 (unsigned long long)rupees, (unsigned long)paise, transaction_id, has_campaign);
 
         payment_broadcast_params_t params = {0};
         params.amount = rupees;
         params.rupees = rupees;
         params.paise = paise;
         params.total_amount = amount_val;
+        params.has_campaign = has_campaign;
         strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
         strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
         strncpy(params.language, lang_str, sizeof(params.language) - 1);
@@ -1635,25 +1649,39 @@ static void template_handle_server_message(const char *topic,
         lang_str = customer_get_default_language();
       }
 
+      bool has_campaign = false;
       const cJSON *j_campaign = cJSON_GetObjectItem(root, "campaign");
       if (!j_campaign) j_campaign = cJSON_GetObjectItem(root, "sound_file");
       if (!j_campaign) j_campaign = cJSON_GetObjectItem(root, "campaign_url");
       if (j_campaign && cJSON_IsString(j_campaign) && j_campaign->valuestring && j_campaign->valuestring[0] != '\0')
       {
-        customer_campaign_process_field(j_campaign->valuestring);
+        char camp_copy[128] = {0};
+        strncpy(camp_copy, j_campaign->valuestring, sizeof(camp_copy) - 1);
+        char *trimmed_camp = prv_str_trim(camp_copy);
+        if (trimmed_camp != NULL && trimmed_camp[0] != '\0')
+        {
+          has_campaign = true;
+          customer_campaign_process_field(trimmed_camp);
+        }
+      }
+
+      if (!has_campaign)
+      {
+        customer_campaign_set_playback_requested(false);
       }
 
       const char *status = (j_status && cJSON_IsString(j_status)) ? j_status->valuestring : "";
       OSI_LOGI(TAG,
-               "[PAYMENT] id=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), lang=%s, status=%s",
+               "[PAYMENT] id=%s, amount=%s (val=%.2f, rupees=%llu, paise=%lu), lang=%s, status=%s, has_campaign=%d",
                transaction_id, amount_str, amount_val, (unsigned long long)rupees,
-               (unsigned long)paise, lang_str, status);
+               (unsigned long)paise, lang_str, status, has_campaign);
 
       payment_broadcast_params_t params = {0};
       params.amount = rupees;
       params.rupees = rupees;
       params.paise = paise;
       params.total_amount = amount_val;
+      params.has_campaign = has_campaign;
       strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
       strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
       strncpy(params.language, lang_str, sizeof(params.language) - 1);

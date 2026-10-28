@@ -650,6 +650,7 @@ void customer_lcd_stop_rotating_idle(void) {}
 static char s_pending_txn_id[64] = {0};
 static char s_pending_amount_str[16] = {0};
 static char s_pending_language[16] = {0};
+static bool s_pending_has_campaign = false;
 
 static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audio_playback_status_t status, int result)
 {
@@ -678,9 +679,16 @@ static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audi
             s_pending_language[0] = '\0';
         }
 
-        /* Trigger active campaign MP3 playback after transaction audio finishes */
-        customer_campaign_on_transaction_completed();
+        /* Trigger active campaign MP3 playback only if campaign field was specified in this transaction */
+        if (s_pending_has_campaign) {
+            customer_campaign_on_transaction_completed();
+        } else {
+            FRAMEWORK_LOG("[CAMPAIGN] Transaction has empty campaign field, normal playback only");
+        }
+        s_pending_has_campaign = false;
     } else if (status == AUDIO_PLAYBACK_STATUS_ERROR) {
+        s_pending_has_campaign = false;
+        customer_campaign_set_playback_requested(false);
         FRAMEWORK_LOG("[PAYMENT_AUDIO] Playback error: %d", result);
         if (s_pending_txn_id[0] != '\0') {
             payment_callback_t cb = {0};
@@ -726,9 +734,12 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
     }
     audio_resource_set_language_prefix(active_folder);
 
-    FRAMEWORK_LOG("Payment broadcast: rupees=%llu, paise=%lu, total=%.2f, lang=%s, folder=%s, is_replay=%d", 
+    FRAMEWORK_LOG("Payment broadcast: rupees=%llu, paise=%lu, total=%.2f, lang=%s, folder=%s, is_replay=%d, has_campaign=%d", 
                   (unsigned long long)params->rupees, (unsigned long)params->paise, params->total_amount,
-                  lang_str, active_folder, is_replay);
+                  lang_str, active_folder, is_replay, params->has_campaign);
+
+    s_pending_has_campaign = params->has_campaign;
+    customer_campaign_set_playback_requested(params->has_campaign);
 
     if (!is_replay) {
         s_total_txn_count++; // add by vipin: increment transaction count for new payment
