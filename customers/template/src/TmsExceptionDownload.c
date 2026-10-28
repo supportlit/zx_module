@@ -546,6 +546,11 @@ static void prv_tms_gen_http_callback(http_response_t *response, void *user_data
 
              response->status_code, response->response_len);
 
+    if (response->response_data && response->response_len > 0)
+    {
+        log_string_in_chunks_with_label(TAG, "GEN_MANIFEST", response->response_data);
+    }
+
     prv_parse_and_queue_gen_manifest(response->response_data, ctx ? ctx->default_lang : "EN");
 
     if (ctx)
@@ -587,6 +592,11 @@ static void prv_tms_manifest_http_callback(http_response_t *response, void *user
     OSI_LOGI(TAG, "[ASYNC-MANIFEST] Initial manifest fetched successfully via HTTP queue (HTTP %d, len=%u)",
 
              response->status_code, response->response_len);
+
+    if (response->response_data && response->response_len > 0)
+    {
+        log_string_in_chunks_with_label(TAG, "INITIAL_MANIFEST", response->response_data);
+    }
 
     /* Check if content is already direct GEN.txt format (has '|' delimiter)
 
@@ -964,11 +974,11 @@ int tms_send_update_sb_flag_ack(
         if (sn_buf[0] == '\0')
         {
 
-            strncpy(sn_buf, "00001504QR70W031184", sizeof(sn_buf) - 1);
+            strncpy(sn_buf, "BP02867772071407197", sizeof(sn_buf) - 1);
         }
     }
 
-    const char *pid = (participant_id && participant_id[0] != '\0') ? participant_id : "";
+    const char *pid = (participant_id && participant_id[0] != '\0') ? participant_id : customer_register_get_partner_id();
 
     const char *wel_flag = (wel_status && wel_status[0] != '\0') ? wel_status : "0";
 
@@ -1004,11 +1014,8 @@ int tms_send_update_sb_flag_ack(
         return -2;
     }
 
-    OSI_LOGI(TAG, "Sending UPDATESBFLAG ACK:");
-
-    OSI_LOGI(TAG, "  Endpoint: %s", ack_url);
-
-    OSI_LOGI(TAG, "  Payload:  %s", payload_str);
+    OSI_LOGI(TAG, "Sending UPDATESBFLAG ACK to %s (length=%u)", ack_url, (unsigned int)strlen(payload_str));
+    log_string_in_chunks_with_label(TAG, "UPDATESBFLAG_ACK", payload_str);
 
     /* Use framework_http_post_json so ACK is also non-blocking on the worker queue */
 

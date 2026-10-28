@@ -8,6 +8,7 @@
 #define __FRAMEWORK_LOG_H__
 
 #include <stdio.h>
+#include <string.h>
 #include "osi_api.h"  // For RTI_LOG
 
 #ifdef __cplusplus
@@ -103,6 +104,39 @@ typedef enum {
 #define LOG_D(fmt, ...)  OSI_LOGD(0, fmt, ##__VA_ARGS__)
 
 void framework_log_buf_dump(const char *tag, const void *buffer, size_t length);
+
+/* ============================================================================
+ * 分块日志输出 (Chunked Logging for Long Messages)
+ * ========================================================================== */
+
+#define LOG_CHUNK_SIZE 64
+
+/**
+ * @brief Print a long null-terminated string in chunks to avoid log truncation.
+ *
+ * @param tag     Log tag (e.g. TAG or "MQTT")
+ * @param message The string content to print in chunks.
+ */
+void log_string_in_chunks(const char *tag, const char *message);
+
+/**
+ * @brief Print a long string in chunks with an explicit descriptive label.
+ *
+ * @param tag     Log tag (e.g. TAG)
+ * @param label   Descriptive label (e.g. "TMS_RESPONSE", "MQTT_RECV", "UPDATESBFLAG")
+ * @param message The string content to print in chunks.
+ */
+void log_string_in_chunks_with_label(const char *tag, const char *label, const char *message);
+
+/**
+ * @brief Print a buffer with explicit length in chunks with a descriptive label.
+ *
+ * @param tag     Log tag (e.g. TAG)
+ * @param label   Descriptive label
+ * @param data    Data buffer pointer
+ * @param length  Data length in bytes
+ */
+void log_buffer_in_chunks_with_label(const char *tag, const char *label, const char *data, size_t length);
 
 /* ============================================================================
  * 条件编译控制

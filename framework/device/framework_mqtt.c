@@ -207,11 +207,9 @@ static void prv_paho_message_handler(void *client, message_data_t *msg)
 static void prv_mqtt_default_message_handler(const char *topic, const char *payload, uint32_t payload_len)
 {
     OSI_LOGI(TAG, "Framework default MQTT handler");
-    OSI_LOGI(TAG, "  Topic: %s", topic);
-    if (payload_len > 0 && payload_len < 256) {
-        OSI_LOGI(TAG, "  Payload: %.*s", payload_len, payload);
-    } else {
-        OSI_LOGI(TAG, "  Payload length: %d", payload_len);
+    OSI_LOGI(TAG, "  Topic: %s, length: %u", topic ? topic : "", (unsigned int)payload_len);
+    if (payload && payload_len > 0) {
+        log_buffer_in_chunks_with_label(TAG, "MQTT_DEFAULT_PAYLOAD", payload, payload_len);
     }
 }
 

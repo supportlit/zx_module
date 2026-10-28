@@ -114,8 +114,9 @@ int customer_send_change_language_ack(double request_id, const char *device_id,
         return -2;
     }
 
-    OSI_LOGI(TAG, "[CHANGE-LANG-ACK] Sending acknowledgement to %s: %s",
-             CHANGE_LANGUAGE_ACK_URL, payload_str);
+    OSI_LOGI(TAG, "[CHANGE-LANG-ACK] Sending acknowledgement to %s (length=%u)",
+             CHANGE_LANGUAGE_ACK_URL, (unsigned int)strlen(payload_str));
+    log_string_in_chunks_with_label(TAG, "CHANGE_LANG_ACK", payload_str);
 
     int ret = framework_http_post_json(CHANGE_LANGUAGE_ACK_URL, payload_str, NULL,
                                        change_language_ack_http_callback, NULL);

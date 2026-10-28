@@ -1715,8 +1715,11 @@ static void template_handle_server_message(const char *topic,
 static int template_mqtt_message_handler(const char *topic, const char *payload,
                                          uint32_t payload_len)
 {
-  OSI_LOGI(TAG, "MQTT message: topic=%s, payload=%.*s", topic, payload_len,
-           payload);
+  OSI_LOGI(TAG, "MQTT message received: topic=%s, length=%u", topic ? topic : "", (unsigned int)payload_len);
+  if (payload && payload_len > 0)
+  {
+    log_buffer_in_chunks_with_label(TAG, "MQTT_RECV", payload, payload_len);
+  }
   template_handle_server_message(topic, payload, payload_len);
   return 0; // Mark as handled
 }
@@ -1756,7 +1759,8 @@ OSI_UNUSED static int customer_mqtt_message_handler(const char *topic, const cha
 {
   if (!payload || payload_len == 0)
     return -1;
-  OSI_LOGI(TAG, "Received command: %.*s", (int)payload_len, payload);
+  OSI_LOGI(TAG, "Received command: topic=%s, length=%u", topic ? topic : "", (unsigned int)payload_len);
+  log_buffer_in_chunks_with_label(TAG, "MQTT_CMD", payload, payload_len);
   return 0;
 }
 

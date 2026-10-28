@@ -120,4 +120,68 @@ void framework_log_factory_mode(int enbale)
         log_factory_mode = 0;
         FRAMEWORK_LOG("Factory mode log disable\n");
     }
+}
+
+void log_buffer_in_chunks_with_label(const char *tag, const char *label, const char *data, size_t length)
+{
+    (void)tag;
+    const char *use_label = (label != NULL && label[0] != '\0') ? label : "CHUNK";
+
+    if (data == NULL)
+    {
+        FRAMEWORK_LOG("[WARN][%s] NULL message\n", use_label);
+        return;
+    }
+
+    if (length == 0)
+    {
+        FRAMEWORK_LOG("[INFO][%s] Empty message (len=0)\n", use_label);
+        return;
+    }
+
+    size_t total_chunks = (length + LOG_CHUNK_SIZE - 1) / LOG_CHUNK_SIZE;
+    size_t offset = 0;
+    size_t chunk_idx = 0;
+
+    char chunk_buf[LOG_CHUNK_SIZE + 1];
+
+    FRAMEWORK_LOG("[INFO][%s] len=%u (%u chunks):\n", use_label, (unsigned int)length, (unsigned int)total_chunks);
+
+    while (offset < length)
+    {
+        size_t chunk_len = length - offset;
+        if (chunk_len > LOG_CHUNK_SIZE)
+        {
+            chunk_len = LOG_CHUNK_SIZE;
+        }
+
+        memcpy(chunk_buf, data + offset, chunk_len);
+        chunk_buf[chunk_len] = '\0';
+
+        FRAMEWORK_LOG("[%s %u/%u] %s\n",
+                      use_label,
+                      (unsigned int)(chunk_idx + 1),
+                      (unsigned int)total_chunks,
+                      chunk_buf);
+
+        offset += chunk_len;
+        chunk_idx++;
+    }
+}
+
+void log_string_in_chunks_with_label(const char *tag, const char *label, const char *message)
+{
+    if (message == NULL)
+    {
+        const char *use_tag = (tag != NULL) ? tag : "LOG";
+        const char *use_label = (label != NULL && label[0] != '\0') ? label : "CHUNK";
+        OSI_LOGE(use_tag, "[%s] Cannot print NULL log message", use_label);
+        return;
+    }
+    log_buffer_in_chunks_with_label(tag, label, message, strlen(message));
+}
+
+void log_string_in_chunks(const char *tag, const char *message)
+{
+    log_string_in_chunks_with_label(tag, "CHUNK", message);
 } 

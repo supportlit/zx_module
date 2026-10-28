@@ -86,9 +86,9 @@ static bool s_test_download_in_progress = false;
 
 /* Case A: Exact test registration response when TEST_FLAG=0 (code 9999, welcome audio download) */
 static const char *s_test_registration_resp __attribute__((unused)) =
-    "0000|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
+    "9999|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
     "b15eeee6-b841-44af-9448-2c58d2cadb11|HPRCEKSPFI|"
-    "0|0|1|https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/new/id_welcome_to_template.mp3|0||1|1|0|0|0|";
+    "0|0|0||0||1|1|1|1|0|";
 
 /* Case B: Exact normal registration response when TEST_FLAG=1 (code 0000, skip test) */
 static const char *s_normal_registration_resp =
@@ -359,7 +359,10 @@ static int parse_tms_registration_response(const char *raw_data,
     char *tok[TMS_MAX_FIELDS] = {0};
     size_t raw_len;
     int total;
-    OSI_LOGI(TAG, "Response is %s", raw_data);
+    if (raw_data != NULL) {
+        OSI_LOGI(TAG, "TMS raw response received; length=%u", (unsigned int)strlen(raw_data));
+        log_string_in_chunks_with_label(TAG, "TMS_RAW_RESP", raw_data);
+    }
     if (raw_data == NULL || resp == NULL)
         return -1;
 
@@ -481,6 +484,7 @@ int tms_register_device_sync(tms_registration_resp_t *out_resp)
 
     OSI_LOGI(TAG, "Starting TMS registration POST");
     OSI_LOGI(TAG, "Registration endpoint: %s", TMS_REGISTRATION_URL);
+    log_string_in_chunks_with_label(TAG, "TMS_REQ_BODY", s_hardcoded_json_req);
     /* Avoid logging IMEI/SIM and the complete request body in production. */
 
     http_res = httpclient_post(&client, TMS_REGISTRATION_URL, &client_data);
@@ -601,7 +605,8 @@ int tms_register_with_redirect(tms_registration_resp_t *out_resp)
         // 1. Success (HTTP 200 OK)
         if (http_res == HTTPCLIENT_OK && client.response_code == 200)
         {
-            OSI_LOGI(TAG, "HTTP 200 received! Response: %s", resp_buf);
+            OSI_LOGI(TAG, "HTTP 200 received (length=%u)", (unsigned int)strlen(resp_buf));
+            log_string_in_chunks_with_label(TAG, "TMS_REDIRECT_RESP", resp_buf);
             ret_status = parse_tms_registration_response(resp_buf, out_resp);
             break;
         }
@@ -718,14 +723,23 @@ static void prv_bg_reg_check_and_send_ack(void)
     const char *exe_flag_str = tms_map_ack_status(s_bg_reg_mgr.exe_requested, s_bg_reg_mgr.exe_ok);
     char pid[64] = {0};
     strncpy(pid, s_bg_reg_mgr.participant_id, sizeof(pid) - 1);
+    if (pid[0] == '\0') {
+        strncpy(pid, customer_register_get_partner_id(), sizeof(pid) - 1);
+    }
     osiMutexUnlock(s_bg_reg_mgr.mutex);
 
-    OSI_LOGI(TAG, "Dispatching UPDATESBFLAG ACK: welfileflag=%s, exefileflag=%s (continuing normal operations)",
-             wel_flag_str, exe_flag_str);
+    char sn[32] = {0};
+    framework_device_config_get_sn(sn, sizeof(sn));
+    if (sn[0] == '\0') {
+        strncpy(sn, "BP02867772071407197", sizeof(sn) - 1);
+    }
+
+    OSI_LOGI(TAG, "Dispatching UPDATESBFLAG ACK: sn=%s, pid=%s, welfileflag=%s, exefileflag=%s (continuing normal operations)",
+             sn, pid, wel_flag_str, exe_flag_str);
 
     int ack_ret = tms_send_update_sb_flag_ack(
         TMS_REGISTRATION_URL,
-        NULL,
+        sn,
         pid,
         wel_flag_str,
         exe_flag_str,

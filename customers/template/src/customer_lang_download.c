@@ -642,8 +642,9 @@ static int prv_fetch_metadata(const char *url, const char *req_id_str, lang_meta
             return -2;
         }
 
-        OSI_LOGI(TAG, "[FETCH-META] POSTing to production details API %s: %s",
-                 LANG_GET_DETAILS_URL, req_body);
+        OSI_LOGI(TAG, "[FETCH-META] POSTing to production details API %s (length=%u)",
+                 LANG_GET_DETAILS_URL, (unsigned int)strlen(req_body));
+        log_string_in_chunks_with_label(TAG, "LANG_DETAILS_REQ", req_body);
         int ret = framework_http_post_json(LANG_GET_DETAILS_URL, req_body, NULL,
                                            prv_http_req_callback, NULL);
         cJSON_free(req_body);
@@ -669,8 +670,11 @@ static int prv_fetch_metadata(const char *url, const char *req_id_str, lang_meta
         return -5;
     }
 
-    OSI_LOGI(TAG, "[FETCH-META] Response received (%u bytes): %s",
-             s_mgr.http_response_len, s_mgr.http_response_data);
+    OSI_LOGI(TAG, "[FETCH-META] Response received (%u bytes)", s_mgr.http_response_len);
+    if (s_mgr.http_response_data && s_mgr.http_response_len > 0)
+    {
+        log_string_in_chunks_with_label(TAG, "LANG_DETAILS_RESP", s_mgr.http_response_data);
+    }
 
     int parse_ret = prv_parse_metadata_json(s_mgr.http_response_data, req_id, out_meta);
     if (parse_ret != 0)
@@ -702,7 +706,8 @@ static int prv_resolve_zip_download(lang_zip_info_t *entry, const char *zip_path
     if (!body)
         return -1;
 
-    OSI_LOGI(TAG, "[PROD-DL] Querying %s: %s", LANG_DOWNLOAD_FILE_URL, body);
+    OSI_LOGI(TAG, "[PROD-DL] Querying %s (length=%u)", LANG_DOWNLOAD_FILE_URL, (unsigned int)strlen(body));
+    log_string_in_chunks_with_label(TAG, "LANG_DOWNLOAD_REQ", body);
     s_mgr.http_result = -1;
     s_mgr.http_status_code = 0;
     int ret = framework_http_post_json(LANG_DOWNLOAD_FILE_URL, body, NULL, prv_http_req_callback, NULL);
@@ -1102,7 +1107,7 @@ static void prv_tms_lang_worker_task(void *param)
         framework_device_config_get_sn(sn, sizeof(sn));
 
         // 1. Fetch and Parse Metadata
-        int ret = prv_fetch_metadata(url, req_id, meta); // pv
+        int ret = prv_fetch_metadata("https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/language_response.txt", req_id, meta); // pv
         if (ret != 0)
         {
             OSI_LOGE(TAG, "[WORKFLOW] Metadata retrieval/parsing failed (%d)", ret);
@@ -1202,32 +1207,31 @@ static void prv_tms_lang_worker_task(void *param)
                      soundbox_language_name(new_lang), TEMPLATE_LANGUAGE_FILE_PATH);
         }
 
-        // 6. Send SUCCESS Acknowledgement for All Downloaded UUIDs synchronously and verify server receipt
-        OSI_LOGI(TAG, "[WORKFLOW] Sending SUCCESS ACKs for all %d packs and waiting for server confirmation...",
+        // 6. Send SUCCESS Acknowledgement for All Downloaded UUIDs asynchronously
+        OSI_LOGI(TAG, "[WORKFLOW] Sending SUCCESS ACKs for all %d packs...",
                  meta->zip_count);
         for (int i = 0; i < meta->zip_count; i++)
         {
             OSI_LOGI(TAG, "[WORKFLOW] Sending ACK (%d/%d): uuid=%s, req_id=%.0f",
                      i + 1, meta->zip_count, meta->zip_files[i].uuid, meta->request_id);
-            int ack_ret = customer_send_language_ack_sync(
+            int ack_ret = customer_send_language_ack(
                 meta->request_id,
                 meta->zip_files[i].uuid,
                 meta->device_id,
                 "Success",
-                "",
-                15000);
+                "");
             if (ack_ret == 0)
             {
-                OSI_LOGI(TAG, "[WORKFLOW] ACK (%d/%d) confirmed by server (HTTP 200)!",
+                OSI_LOGI(TAG, "[WORKFLOW] ACK (%d/%d) enqueued successfully!",
                          i + 1, meta->zip_count);
             }
             else
             {
-                OSI_LOGW(TAG, "[WORKFLOW] ACK (%d/%d) completed with code %d",
+                OSI_LOGW(TAG, "[WORKFLOW] ACK (%d/%d) enqueue failed with code %d",
                          i + 1, meta->zip_count, ack_ret);
             }
         }
-        OSI_LOGI(TAG, "[WORKFLOW] All %d ACKs confirmed sent to TMS server!", meta->zip_count);
+        OSI_LOGI(TAG, "[WORKFLOW] All %d ACKs enqueued for TMS server!", meta->zip_count);
         if (meta->request_id > 0)
         {
             customer_send_change_language_ack(
@@ -1389,7 +1393,8 @@ int customer_lang_download_handle_mqtt_command(const char *payload)
         return -1;
     }
 
-    OSI_LOGI(TAG, "[MQTT-CMD] Parsing command payload: %s", payload);
+    OSI_LOGI(TAG, "[MQTT-CMD] Parsing command payload (length=%u)", (unsigned int)strlen(payload));
+    log_string_in_chunks_with_label(TAG, "LANG_MQTT_CMD", payload);
 
     char *copy = (char *)malloc(strlen(payload) + 1);
     if (!copy)

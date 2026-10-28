@@ -95,7 +95,8 @@ static int prv_publish_json(const char *topic, cJSON *json)
     if (ret != 0) {
         OSI_LOGE(TAG, "Failed to publish to %s: %d", topic, ret);
     } else {
-        OSI_LOGI(TAG, "Published to %s: %s", topic, payload);
+        OSI_LOGI(TAG, "Published status report to %s (length=%u)", topic, (unsigned int)strlen(payload));
+        log_string_in_chunks_with_label(TAG, "STATUS_REPORT_PAYLOAD", payload);
     }
 
     cJSON_free(payload);

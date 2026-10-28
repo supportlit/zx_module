@@ -1,3 +1,4 @@
+#include <string.h>
 #include "framework_http.h"
 #include "framework_log.h"
 #include "cJSON.h"
@@ -68,7 +69,8 @@ int prv_send_json(cJSON *json_body)
         return -2;
     }
 
-    OSI_LOGI(TAG, "Posting health status: %s", payload_str);
+    OSI_LOGI(TAG, "Posting health status to %s (length=%u)", HEARTBEAT_URL, (unsigned int)strlen(payload_str));
+    log_string_in_chunks_with_label(TAG, "HEARTBEAT_PAYLOAD", payload_str);
 
     /* framework_http_post_json makes its own internal copy of payload_str */
     int ret = framework_http_post_json(HEARTBEAT_URL, payload_str, NULL, health_status_http_callback, NULL);

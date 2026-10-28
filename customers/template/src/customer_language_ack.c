@@ -113,7 +113,8 @@ int customer_send_language_ack(double request_id, const char *uuid, const char *
         return -2;
     }
 
-    OSI_LOGI(TAG, "[LANG-ACK] Sending acknowledgement to %s: %s", LANGUAGE_ACK_URL, payload_str);
+    OSI_LOGI(TAG, "[LANG-ACK] Sending acknowledgement to %s (length=%u)", LANGUAGE_ACK_URL, (unsigned int)strlen(payload_str));
+    log_string_in_chunks_with_label(TAG, "LANG_ACK_PAYLOAD", payload_str);
 
     int ret = framework_http_post_json(LANGUAGE_ACK_URL, payload_str, NULL, language_ack_http_callback, NULL);
     cJSON_free(payload_str);
@@ -127,108 +128,10 @@ int customer_send_language_ack(double request_id, const char *uuid, const char *
     return 0;
 }
 
-typedef struct {
-    osiSemaphore_t *sem;
-    int status_code;
-    int result;
-} lang_ack_sync_ctx_t;
-
-static void language_ack_sync_callback(http_response_t *response, void *user_data)
-{
-    lang_ack_sync_ctx_t *ctx = (lang_ack_sync_ctx_t *)user_data;
-    if (response)
-    {
-        language_ack_http_callback(response, NULL);
-        if (ctx)
-        {
-            ctx->status_code = response->status_code;
-            ctx->result = (int)response->result;
-        }
-    }
-    if (ctx && ctx->sem)
-    {
-        osiSemaphoreRelease(ctx->sem);
-    }
-}
-
 int customer_send_language_ack_sync(double request_id, const char *uuid, const char *device_id,
                                     const char *status, const char *reason, uint32_t timeout_ms)
 {
-    cJSON *json = cJSON_CreateObject();
-    if (!json)
-    {
-        OSI_LOGE(TAG, "[LANG-ACK-SYNC] Failed to create JSON object");
-        return -1;
-    }
-
-    double req_id = (request_id > 0) ? request_id : SAMPLE_REQUEST_ID;
-    cJSON_AddNumberToObject(json, "request_id", req_id);
-
-    const char *uuid_val = (uuid && uuid[0] != '\0') ? uuid : SAMPLE_UUID;
-    cJSON_AddStringToObject(json, "uuid", uuid_val);
-
-    const char *dev_id_val = (device_id && device_id[0] != '\0') ? device_id : SAMPLE_DEVICE_ID;
-    cJSON_AddStringToObject(json, "deviceId", dev_id_val);
-
-    const char *status_val = (status && status[0] != '\0') ? status : "Success";
-    cJSON_AddStringToObject(json, "status", status_val);
-
-    const char *reason_val = (reason != NULL) ? reason : "";
-    cJSON_AddStringToObject(json, "reason", reason_val);
-
-    char *payload_str = cJSON_PrintUnformatted(json);
-    cJSON_Delete(json);
-
-    if (payload_str == NULL)
-    {
-        OSI_LOGE(TAG, "[LANG-ACK-SYNC] Failed to print JSON");
-        return -2;
-    }
-
-    lang_ack_sync_ctx_t ctx = {0};
-    ctx.sem = osiSemaphoreCreate(1, 0);
-    if (!ctx.sem)
-    {
-        OSI_LOGE(TAG, "[LANG-ACK-SYNC] Failed to create semaphore");
-        cJSON_free(payload_str);
-        return -3;
-    }
-
-    OSI_LOGI(TAG, "[LANG-ACK-SYNC] Sending synchronous acknowledgement to %s: %s",
-             LANGUAGE_ACK_URL, payload_str);
-
-    int ret = framework_http_post_json(LANGUAGE_ACK_URL, payload_str, NULL,
-                                       language_ack_sync_callback, &ctx);
-    cJSON_free(payload_str);
-
-    if (ret != 0)
-    {
-        OSI_LOGE(TAG, "[LANG-ACK-SYNC] Failed to enqueue HTTP POST: %d", ret);
-        osiSemaphoreDelete(ctx.sem);
-        return ret;
-    }
-
-    if (timeout_ms == 0)
-    {
-        timeout_ms = 15000;
-    }
-
-    bool ok = osiSemaphoreTryAcquire(ctx.sem, timeout_ms);
-    osiSemaphoreDelete(ctx.sem);
-
-    if (!ok)
-    {
-        OSI_LOGE(TAG, "[LANG-ACK-SYNC] Request timed out (%u ms)", (unsigned)timeout_ms);
-        return -4;
-    }
-
-    if (ctx.result != HTTP_RESULT_SUCCESS || ctx.status_code != 200)
-    {
-        OSI_LOGW(TAG, "[LANG-ACK-SYNC] Non-200 HTTP response: status=%d, result=%d",
-                 ctx.status_code, ctx.result);
-        return -5;
-    }
-
-    OSI_LOGI(TAG, "[LANG-ACK-SYNC] Server confirmed acknowledgement (HTTP 200 OK)");
-    return 0;
+    (void)timeout_ms;
+    /* Forward directly to asynchronous ACK to avoid blocking and prevent dangling stack pointer/semaphore crashes */
+    return customer_send_language_ack(request_id, uuid, device_id, status, reason);
 }

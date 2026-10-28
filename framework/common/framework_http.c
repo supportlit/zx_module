@@ -615,6 +615,10 @@ static void prv_execute_http_job(http_request_item_t *item)
     char *header_buf = NULL;
 
     OSI_LOGI(TAG , " Executing HTTP request: %s", request->url);
+    if (request->body && (request->body_len > 0 || strlen(request->body) > 0)) {
+        size_t b_len = request->body_len > 0 ? request->body_len : strlen(request->body);
+        log_buffer_in_chunks_with_label(TAG, "HTTP_REQ", request->body, b_len);
+    }
 
     response_buf = malloc(HTTP_RESPONSE_BUF_SIZE);
     if (!response_buf) {
@@ -677,12 +681,18 @@ static void prv_execute_http_job(http_request_item_t *item)
         response.response_len = strlen(response_buf);
         OSI_LOGI(TAG , " HTTP request success, status=%d, len=%u",
                  response.status_code, response.response_len);
+        if (response.response_len > 0) {
+            log_string_in_chunks_with_label(TAG, "HTTP_RESP", response_buf);
+        }
     } else {
         response.result = HTTP_RESULT_ERROR_HTTP;
         response.response_data = response_buf;
         response.response_len = strlen(response_buf);
         OSI_LOGE(TAG , " HTTP request failed, ret=%d, status=%d",
                  http_ret, client.response_code);
+        if (response.response_len > 0) {
+            log_string_in_chunks_with_label(TAG, "HTTP_RESP", response_buf);
+        }
     }
 
     callback(&response, request->user_data);

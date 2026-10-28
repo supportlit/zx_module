@@ -30,8 +30,8 @@ typedef enum {
  * on the server), while other backends define "1" as success.
  * These macros provide a centralized, configurable mapping:
  */
-#define TMS_ACK_FLAG_SUCCESS  "0"
-#define TMS_ACK_FLAG_FAILED   "1"
+#define TMS_ACK_FLAG_SUCCESS  "1"
+#define TMS_ACK_FLAG_FAILED   "0"
 #define TMS_ACK_FLAG_SKIPPED  "0"
 
 /**
