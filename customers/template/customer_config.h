@@ -63,7 +63,7 @@
 // 1 = Test Mode   (Runs one-time welcome audio test, response code 9999)
 // 0 = Normal Mode (Skips test, response code 0000, direct MQTT)
 // ============================================================================
-#define TMS_REGISTRATION_TEST_ENABLE 0
+#define TMS_REGISTRATION_TEST_ENABLE 1
 
 // ============================================================================
 // TMS HTTPS Heartbeat Configuration

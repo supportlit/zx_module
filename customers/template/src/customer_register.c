@@ -54,7 +54,7 @@ static const char *s_hardcoded_json_req =
     "\"IMEI\":\"867772071407197\","
     "\"SIMNo\":\"89914526034074312745\","
     "\"firmware_version\":\"v1.2.0\","
-    "\"active_language\":\"1\""
+    "\"active_language\":\"0\""
     "}";
 
 static char s_tms_partner_id[64] = {0};
@@ -88,7 +88,7 @@ static bool s_test_download_in_progress = false;
 static const char *s_test_registration_resp __attribute__((unused)) =
     "9999|1.7.140.58|9000|admin|Pine@987|0|ABCD||"
     "b15eeee6-b841-44af-9448-2c58d2cadb11|HPRCEKSPFI|"
-    "0|0|0||0||1|1|0|0|0|";
+    "0|0|0||0||1|1|1|1|0|";
 
 /* Case B: Exact normal registration response when TEST_FLAG=1 (code 0000, skip test) */
 static const char *s_normal_registration_resp =

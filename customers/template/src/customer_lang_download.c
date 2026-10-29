@@ -1130,7 +1130,7 @@ static void prv_tms_lang_worker_task(void *param)
         framework_device_config_get_sn(sn, sizeof(sn));
 
         // 1. Fetch and Parse Metadata
-        int ret = prv_fetch_metadata("https://klgbefvjgjtcwcsyfwwc.supabase.co/storage/v1/object/public/audio/language_response.txt", req_id, meta); // pv
+        int ret = prv_fetch_metadata(url, req_id, meta); // pv
         if (ret != 0)
         {
             OSI_LOGE(TAG, "[WORKFLOW] Metadata retrieval/parsing failed (%d)", ret);

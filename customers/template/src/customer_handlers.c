@@ -1401,7 +1401,7 @@ void customer_init(void)
         bk_led_on_net_well_server_connect();
     }
     char imei[32] = {0};
-    snprintf(imei, sizeof(imei), "BP02%s", "867772071407197");
+    snprintf(imei, sizeof(imei), "BP02%s", "869683086200139");
     OSI_LOGI(TAG, "Setting device SN to IMEI: %s", imei);
     framework_device_config_set_sn(imei);
     if (customer_battery_config_register() != 0)
