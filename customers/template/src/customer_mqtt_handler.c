@@ -36,7 +36,7 @@
 // TEMPLATE_CERTS_DIR_PATH "cis-soundbox-private.pem.key"
 
 // #define MQTT_BROKER_HOST        "iot-dev.template.com"
-#define MQTT_BROKER_HOST "a3e38vloi5hkal-ats.iot.ap-south-1.amazonaws.com"
+#define MQTT_BROKER_HOST "a1ha6sbciuji3v-ats.iot.ap-southeast-2.amazonaws.com"
 #define MQTT_BROKER_PORT 8883
 #define MQTT_USE_TLS 1
 #define MQTT_KEEPALIVE_SEC 60
@@ -86,11 +86,12 @@ static int reconnect_count_idx = 0;
 // Topics to subscribe after connection
 static const char *g_template_topics[] = {
 #if defined(CUSTOMER_ENABLE_LCD) && (CUSTOMER_ENABLE_LCD == 1)
-    "device/LIT_PBL_DISP_006/pebble_screen", 
+    // "device/LIT_PBL_DISP_006/pebble_screen", 
 #else
     //"device/LIT_PBL_001/pebble",
     "device/LIT_PKT_005/pocket",
 #endif
+    "BP1/%s/payment",
     "BP1/%s/sound-update",
     "BP1/%s/ota-update",
     "BP1/%s/restart",

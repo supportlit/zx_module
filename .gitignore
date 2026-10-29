@@ -1,0 +1,36 @@
+# Build output directories
+out/
+output_*/
+output/
+
+# Ninja build files
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+
+# CMake build artifacts and logs
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeOutput.log
+CMakeError.log
+TargetDirectories.txt
+
+# Object and binary outputs
+*.obj
+*.o
+*.elf
+*.map
+
+# Python cache (except prebuilts)
+__pycache__/
+
+# Editor & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
