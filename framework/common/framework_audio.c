@@ -604,9 +604,9 @@ static int prv_play_audio_file(const char *file_path, audio_resource_id_t res_id
         AUDIO_RETURN_ERROR(callback, res_id, ret);
     }
     
-    /* Wait for playback completion */
+    /* Wait for playback completion (bounded 15s timeout prevents audio queue deadlock on corrupt stream) */
     if (s_manager.complete_semaphore) {
-        osiSemaphoreTryAcquire(s_manager.complete_semaphore, 2 * 60 * 1000);  /* 2 minute timeout */
+        osiSemaphoreTryAcquire(s_manager.complete_semaphore, 15 * 1000);
     }
     
     /* Add delay based on file size */
@@ -686,7 +686,7 @@ static int prv_play_combo_stream(audio_combo_request_t *combo_req, audio_playbac
     }
 
     if (s_manager.complete_semaphore) {
-        osiSemaphoreTryAcquire(s_manager.complete_semaphore, 2 * 60 * 1000);
+        osiSemaphoreTryAcquire(s_manager.complete_semaphore, 15 * 1000); /* 15s timeout prevents worker deadlock */
     }
     mp3PlayStop(0xffffffff, 1);
     prv_release_stream_buffer();
@@ -726,7 +726,7 @@ static int prv_play_raw_stream(char *buf, uint32_t buf_size, audio_playback_call
     }
 
     if (s_manager.complete_semaphore) {
-        osiSemaphoreTryAcquire(s_manager.complete_semaphore, 2 * 60 * 1000);
+        osiSemaphoreTryAcquire(s_manager.complete_semaphore, 15 * 1000); /* 15s timeout prevents worker deadlock */
     }
 
     prv_release_stream_buffer();
@@ -779,7 +779,7 @@ static int prv_play_sequence_stream(audio_sequence_stream_builder_t builder, voi
     }
 
     if (s_manager.complete_semaphore) {
-        osiSemaphoreTryAcquire(s_manager.complete_semaphore, 2 * 60 * 1000);
+        osiSemaphoreTryAcquire(s_manager.complete_semaphore, 15 * 1000); /* 15s timeout prevents worker deadlock */
     }
 
     prv_release_stream_buffer();

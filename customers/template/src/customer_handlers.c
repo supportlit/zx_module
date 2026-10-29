@@ -1041,12 +1041,20 @@ int customer_msg_handler(framework_msg_t *msg)
         OSI_LOGI("Test-Time", "[MSG_NET_CONNECTED] Network connected! Triggering framework_network_ntp_sync_now(false)");
         framework_network_ntp_sync_now(false);
 
-        /* Launch TMS registration in a dedicated thread with 12KB stack for HTTPS / TLS */
-        OSI_LOGI(TAG, "Launching TMS Registration background task...");
-        osiThread_t *reg_th = osiThreadCreate("tms_reg", tms_registration_task, NULL, 120, 16 * 1024);
-        if (!reg_th)
+        /* Launch TMS registration in a dedicated thread with 16KB stack for HTTPS / TLS if not already running */
+        if (!customer_register_is_in_progress())
         {
-            OSI_LOGE(TAG, "Failed to create TMS registration thread");
+            OSI_LOGI(TAG, "Launching TMS Registration background task...");
+            osiThread_t *reg_th = osiThreadCreate("tms_reg", tms_registration_task, NULL, 120, 16 * 1024);
+            if (!reg_th)
+            {
+                customer_register_set_in_progress(false);
+                OSI_LOGE(TAG, "Failed to create TMS registration thread");
+            }
+        }
+        else
+        {
+            OSI_LOGI(TAG, "TMS Registration background task already active, skipping spawn");
         }
 
         return 0;
@@ -1433,7 +1441,7 @@ void customer_init(void)
         OSI_LOGE(TAG, "Failed to create function long press work");
     }
 
-    osiThreadCreate("template_netmonit", abnormal_work_callback, NULL, 130, 1024);
+    osiThreadCreate("template_netmonit", abnormal_work_callback, NULL, 130, 2 * 1024);
     OSI_LOGI(TAG, "========================================");
     OSI_LOGI(TAG, "template Initialization Complete");
     OSI_LOGI(TAG, "========================================");

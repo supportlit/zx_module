@@ -659,10 +659,117 @@ void customer_lcd_start_rotating_idle(void) {}
 void customer_lcd_stop_rotating_idle(void) {}
 #endif
 
+typedef struct {
+    char txn_id[64];
+    char amount_str[16];
+    char language[16];
+    bool has_campaign;
+    bool is_valid;
+} pending_payment_entry_t;
+
+#define PENDING_PAYMENT_QUEUE_SIZE 8
+static pending_payment_entry_t s_pending_payment_queue[PENDING_PAYMENT_QUEUE_SIZE];
+static int s_pending_q_head = 0;
+static int s_pending_q_tail = 0;
+static int s_pending_q_count = 0;
+static osiMutex_t *s_pending_payment_mutex = NULL;
+
 static char s_pending_txn_id[64] = {0};
 static char s_pending_amount_str[16] = {0};
 static char s_pending_language[16] = {0};
 static bool s_pending_has_campaign = false;
+
+static void prv_pending_payment_queue_init(void)
+{
+    if (s_pending_payment_mutex == NULL) {
+        s_pending_payment_mutex = osiMutexCreate();
+    }
+}
+
+static void prv_pending_payment_push(const char *txn_id, const char *amount_str, const char *language, bool has_campaign)
+{
+    prv_pending_payment_queue_init();
+    if (s_pending_payment_mutex) {
+        osiMutexLock(s_pending_payment_mutex);
+    }
+
+    if (s_pending_q_count >= PENDING_PAYMENT_QUEUE_SIZE) {
+        FRAMEWORK_LOG("[PAYMENT_QUEUE] Queue full (%d), dropping oldest unacknowledged item", s_pending_q_count);
+        s_pending_q_tail = (s_pending_q_tail + 1) % PENDING_PAYMENT_QUEUE_SIZE;
+        s_pending_q_count--;
+    }
+
+    pending_payment_entry_t *entry = &s_pending_payment_queue[s_pending_q_head];
+    memset(entry, 0, sizeof(*entry));
+    if (txn_id && txn_id[0] != '\0') {
+        strncpy(entry->txn_id, txn_id, sizeof(entry->txn_id) - 1);
+    }
+    if (amount_str && amount_str[0] != '\0') {
+        strncpy(entry->amount_str, amount_str, sizeof(entry->amount_str) - 1);
+    }
+    if (language && language[0] != '\0') {
+        strncpy(entry->language, language, sizeof(entry->language) - 1);
+    }
+    entry->has_campaign = has_campaign;
+    entry->is_valid = true;
+
+    s_pending_q_head = (s_pending_q_head + 1) % PENDING_PAYMENT_QUEUE_SIZE;
+    s_pending_q_count++;
+
+    // Mirror to legacy static variables for backward compatibility
+    if (txn_id && txn_id[0] != '\0') {
+        strncpy(s_pending_txn_id, txn_id, sizeof(s_pending_txn_id) - 1);
+        s_pending_txn_id[sizeof(s_pending_txn_id) - 1] = '\0';
+    }
+    if (amount_str && amount_str[0] != '\0') {
+        strncpy(s_pending_amount_str, amount_str, sizeof(s_pending_amount_str) - 1);
+        s_pending_amount_str[sizeof(s_pending_amount_str) - 1] = '\0';
+    }
+    if (language && language[0] != '\0') {
+        strncpy(s_pending_language, language, sizeof(s_pending_language) - 1);
+        s_pending_language[sizeof(s_pending_language) - 1] = '\0';
+    }
+    s_pending_has_campaign = has_campaign;
+
+    FRAMEWORK_LOG("[PAYMENT_QUEUE] Enqueued txn_id=%s, q_depth=%d", entry->txn_id, s_pending_q_count);
+
+    if (s_pending_payment_mutex) {
+        osiMutexUnlock(s_pending_payment_mutex);
+    }
+}
+
+static bool prv_pending_payment_pop(pending_payment_entry_t *out_entry)
+{
+    bool found = false;
+    prv_pending_payment_queue_init();
+    if (s_pending_payment_mutex) {
+        osiMutexLock(s_pending_payment_mutex);
+    }
+
+    if (s_pending_q_count > 0) {
+        *out_entry = s_pending_payment_queue[s_pending_q_tail];
+        memset(&s_pending_payment_queue[s_pending_q_tail], 0, sizeof(pending_payment_entry_t));
+        s_pending_q_tail = (s_pending_q_tail + 1) % PENDING_PAYMENT_QUEUE_SIZE;
+        s_pending_q_count--;
+        found = true;
+        FRAMEWORK_LOG("[PAYMENT_QUEUE] Dequeued txn_id=%s, remaining=%d", out_entry->txn_id, s_pending_q_count);
+    } else {
+        // Fallback to legacy static globals if queue empty
+        if (s_pending_txn_id[0] != '\0') {
+            strncpy(out_entry->txn_id, s_pending_txn_id, sizeof(out_entry->txn_id) - 1);
+            strncpy(out_entry->amount_str, s_pending_amount_str, sizeof(out_entry->amount_str) - 1);
+            strncpy(out_entry->language, s_pending_language, sizeof(out_entry->language) - 1);
+            out_entry->has_campaign = s_pending_has_campaign;
+            out_entry->is_valid = true;
+            found = true;
+        }
+    }
+
+    if (s_pending_payment_mutex) {
+        osiMutexUnlock(s_pending_payment_mutex);
+    }
+    return found;
+}
 
 static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audio_playback_status_t status, int result)
 {
@@ -670,15 +777,17 @@ static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audi
         FRAMEWORK_LOG("[PAYMENT_AUDIO] Playback started on speaker");
     } else if (status == AUDIO_PLAYBACK_STATUS_ENDED) {
         FRAMEWORK_LOG("[PAYMENT_AUDIO] Playback completed successfully");
-        if (s_pending_txn_id[0] != '\0') {
+        pending_payment_entry_t entry = {0};
+        bool has_entry = prv_pending_payment_pop(&entry);
+        if (has_entry && entry.txn_id[0] != '\0') {
             payment_callback_t cb = {0};
             char sn[32] = {0};
             framework_device_config_get_sn(sn, sizeof(sn));
             strncpy(cb.serial_number, sn, sizeof(cb.serial_number) - 1);
             strncpy(cb.status, "1", sizeof(cb.status) - 1); // 1 = Success
-            strncpy(cb.transaction_id, s_pending_txn_id, sizeof(cb.transaction_id) - 1);
-            strncpy(cb.amount, s_pending_amount_str, sizeof(cb.amount) - 1);
-            strncpy(cb.language, s_pending_language, sizeof(cb.language) - 1);
+            strncpy(cb.transaction_id, entry.txn_id, sizeof(cb.transaction_id) - 1);
+            strncpy(cb.amount, entry.amount_str, sizeof(cb.amount) - 1);
+            strncpy(cb.language, entry.language, sizeof(cb.language) - 1);
             cb.reason[0] = '\0';
             osiTime_t now = {0};
             osiGetTime(&now);
@@ -686,13 +795,15 @@ static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audi
                      now.tm_year, now.tm_mon, now.tm_mday,
                      now.tm_hour, now.tm_min, now.tm_sec);
             customer_status_report_payment(&cb);
-            s_pending_txn_id[0] = '\0';
-            s_pending_amount_str[0] = '\0';
-            s_pending_language[0] = '\0';
+            if (s_pending_txn_id[0] != '\0' && strcmp(s_pending_txn_id, entry.txn_id) == 0) {
+                s_pending_txn_id[0] = '\0';
+                s_pending_amount_str[0] = '\0';
+                s_pending_language[0] = '\0';
+            }
         }
 
         /* Trigger active campaign MP3 playback only if campaign field was specified in this transaction */
-        if (s_pending_has_campaign) {
+        if (has_entry && entry.has_campaign) {
             customer_campaign_on_transaction_completed();
         } else {
             FRAMEWORK_LOG("[CAMPAIGN] Transaction has empty campaign field, normal playback only");
@@ -702,15 +813,17 @@ static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audi
         s_pending_has_campaign = false;
         customer_campaign_set_playback_requested(false);
         FRAMEWORK_LOG("[PAYMENT_AUDIO] Playback error: %d", result);
-        if (s_pending_txn_id[0] != '\0') {
+        pending_payment_entry_t entry = {0};
+        bool has_entry = prv_pending_payment_pop(&entry);
+        if (has_entry && entry.txn_id[0] != '\0') {
             payment_callback_t cb = {0};
             char sn[32] = {0};
             framework_device_config_get_sn(sn, sizeof(sn));
             strncpy(cb.serial_number, sn, sizeof(cb.serial_number) - 1);
             strncpy(cb.status, "0", sizeof(cb.status) - 1); // 0 = Failure
-            strncpy(cb.transaction_id, s_pending_txn_id, sizeof(cb.transaction_id) - 1);
-            strncpy(cb.amount, s_pending_amount_str, sizeof(cb.amount) - 1);
-            strncpy(cb.language, s_pending_language, sizeof(cb.language) - 1);
+            strncpy(cb.transaction_id, entry.txn_id, sizeof(cb.transaction_id) - 1);
+            strncpy(cb.amount, entry.amount_str, sizeof(cb.amount) - 1);
+            strncpy(cb.language, entry.language, sizeof(cb.language) - 1);
             snprintf(cb.reason, sizeof(cb.reason), "Audio play error %d", result);
             osiTime_t now = {0};
             osiGetTime(&now);
@@ -718,9 +831,11 @@ static void prv_payment_audio_playback_callback(audio_resource_id_t res_id, audi
                      now.tm_year, now.tm_mon, now.tm_mday,
                      now.tm_hour, now.tm_min, now.tm_sec);
             customer_status_report_payment(&cb);
-            s_pending_txn_id[0] = '\0';
-            s_pending_amount_str[0] = '\0';
-            s_pending_language[0] = '\0';
+            if (s_pending_txn_id[0] != '\0' && strcmp(s_pending_txn_id, entry.txn_id) == 0) {
+                s_pending_txn_id[0] = '\0';
+                s_pending_amount_str[0] = '\0';
+                s_pending_language[0] = '\0';
+            }
         }
     }
 }
@@ -756,23 +871,14 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
     if (!is_replay) {
         s_total_txn_count++; // add by vipin: increment transaction count for new payment
         s_last_txn_count = s_total_txn_count;
-        if (params->transaction_id[0] != '\0') {
-            strncpy(s_pending_txn_id, params->transaction_id, sizeof(s_pending_txn_id) - 1);
-            s_pending_txn_id[sizeof(s_pending_txn_id) - 1] = '\0';
-        }
+        char pending_amt_buf[16] = {0};
         if (params->amount_str[0] != '\0') {
-            strncpy(s_pending_amount_str, params->amount_str, sizeof(s_pending_amount_str) - 1);
-            s_pending_amount_str[sizeof(s_pending_amount_str) - 1] = '\0';
+            strncpy(pending_amt_buf, params->amount_str, sizeof(pending_amt_buf) - 1);
         } else {
-            snprintf(s_pending_amount_str, sizeof(s_pending_amount_str), "%.2f", params->total_amount);
+            snprintf(pending_amt_buf, sizeof(pending_amt_buf), "%.2f", params->total_amount);
         }
-        if (params->language[0] != '\0') {
-            strncpy(s_pending_language, params->language, sizeof(s_pending_language) - 1);
-            s_pending_language[sizeof(s_pending_language) - 1] = '\0';
-        } else {
-            strncpy(s_pending_language, customer_get_default_language(), sizeof(s_pending_language) - 1);
-            s_pending_language[sizeof(s_pending_language) - 1] = '\0';
-        }
+        const char *chosen_lang = (params->language[0] != '\0') ? params->language : customer_get_default_language();
+        prv_pending_payment_push(params->transaction_id, pending_amt_buf, chosen_lang, params->has_campaign);
     }
 
     audio_list = (char *)malloc(MAX_AUDIO_LIST_SIZE);

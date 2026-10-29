@@ -171,13 +171,13 @@ static int prv_save_download_info(const char *info_path, const http_download_inf
     if (!info_path || !info) {
         return -1;
     }
-    int fd = fs_open(info_path, "wb+");
-    if (fd <= 0) {
-        return -2;
-    }
     while (audio_resource_is_playing())
     {
         osiThreadSleep(20);
+    }
+    int fd = fs_open(info_path, "wb+");
+    if (fd <= 0) {
+        return -2;
     }
     
     size_t n = fs_write(info, 1, sizeof(http_download_info_t), fd);

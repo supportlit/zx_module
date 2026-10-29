@@ -628,14 +628,17 @@ static void template_handle_server_message(const char *topic,
   }
   OSI_LOGI(TAG, "[MQTT] Received topic: %s", topic);
 
-  /* 2. Safely copy and validate incoming payload in a bounded buffer. */
-  char buf[512];
-  if (payload_len >= sizeof(buf))
+  /* 2. Safely copy and validate incoming payload in a bounded static buffer (avoid stack exhaustion and truncation). */
+  #define TEMPLATE_MQTT_MAX_PAYLOAD 2048
+  static char s_mqtt_msg_buf[TEMPLATE_MQTT_MAX_PAYLOAD];
+  if (payload_len >= TEMPLATE_MQTT_MAX_PAYLOAD)
   {
-    payload_len = sizeof(buf) - 1;
+    OSI_LOGW(TAG, "[MQTT] Payload length %u exceeds buffer limit %u, truncating", (unsigned int)payload_len, (unsigned int)(TEMPLATE_MQTT_MAX_PAYLOAD - 1));
+    payload_len = TEMPLATE_MQTT_MAX_PAYLOAD - 1;
   }
-  memcpy(buf, payload, payload_len);
-  buf[payload_len] = '\0';
+  memcpy(s_mqtt_msg_buf, payload, payload_len);
+  s_mqtt_msg_buf[payload_len] = '\0';
+  char *buf = s_mqtt_msg_buf;
 
   /* 3. Identify the operation from the MQTT topic and dispatch. */
 
@@ -892,7 +895,10 @@ static void template_handle_server_message(const char *topic,
     {
       OSI_LOGI(TAG, "[RESTART] Executing device reset");
       customer_dux_publish_device_power(0);
+      cJSON_Delete(root);
+      osiThreadSleep(800); /* Allow MQTT socket to transmit power-off telemetry */
       osiSysReset();
+      return;
     }
     else
     {
@@ -1566,7 +1572,9 @@ static void template_handle_server_message(const char *topic,
         params.has_campaign = has_campaign;
         strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
         strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
-        // strncpy(params.language, lang_str, sizeof(params.language) - 1);
+        if (lang_str && lang_str[0] != '\0') {
+          strncpy(params.language, lang_str, sizeof(params.language) - 1);
+        }
 
         int ret = customer_payment_broadcast(&params);
         if (ret != 0)
@@ -1770,9 +1778,16 @@ static void template_mqtt_reconnect_handler(void *data)
   OSI_LOGI(TAG,
            "MQTT reconnect handler called, is_connected=%d",
            framework_network_is_connected());
-  while (!framework_network_is_connected())
+  /* Bounded wait: wait up to 2 seconds for transient network glitches, then exit to let MQTT worker yield */
+  int retry_count = 0;
+  while (!framework_network_is_connected() && retry_count < 10)
   {
     osiThreadSleep(200);
+    retry_count++;
+  }
+  if (!framework_network_is_connected())
+  {
+    OSI_LOGW(TAG, "Network not ready after %d ms in reconnect handler, exiting to allow clean worker yield", retry_count * 200);
   }
 }
 

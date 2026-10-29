@@ -966,7 +966,7 @@ OSI_SECTION_RW_KEEP int lcd_init()
 
     font_used_handle = font_ch_handle ;
 
-    osiThreadCreate("flip_async", flip_async_thread, NULL, 120, 1024);
+    osiThreadCreate("flip_async", flip_async_thread, NULL, 120, 2 * 1024);
 
     SDK_LOG_V("leave");
 

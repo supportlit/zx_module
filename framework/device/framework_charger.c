@@ -177,7 +177,7 @@ int framework_charger_fake_poweron(void)
     
     /* Create monitoring task */
     osiThread_t *task = osiThreadCreate("fakeChg", prv_fake_poweron_task, 
-                                        NULL, 120, 1024);
+                                        NULL, 120, 2 * 1024);
     if (!task) {
         OSI_LOGE(TAG, "Failed to create fake power-on task");
         osiMessageQueueDelete(g_charger_queue);

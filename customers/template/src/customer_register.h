@@ -49,6 +49,8 @@ typedef struct {
     /* 8. Mandatory */ char active_language[16];  // e.g., "1"
 } tms_registration_req_t;
 void tms_registration_task(void *param);
+bool customer_register_is_in_progress(void);
+void customer_register_set_in_progress(bool in_progress);
 int tms_register_device_sync(tms_registration_resp_t *out_resp);
 void customer_register_process_response(const tms_registration_resp_t *resp);
 void customer_register_handle_lang_download(const tms_registration_resp_t *resp);

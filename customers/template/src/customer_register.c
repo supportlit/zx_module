@@ -1267,8 +1267,21 @@ void customer_register_process_response(const tms_registration_resp_t *resp)
     }
 }
 
+static bool s_tms_reg_in_progress = false;
+
+bool customer_register_is_in_progress(void)
+{
+    return s_tms_reg_in_progress;
+}
+
+void customer_register_set_in_progress(bool in_progress)
+{
+    s_tms_reg_in_progress = in_progress;
+}
+
 void tms_registration_task(void *param)
 {
+    s_tms_reg_in_progress = true;
     unsigned int attempts = 0U;
     unsigned int retry_delay_ms = TMS_RETRY_INITIAL_DELAY_MS;
     static tms_registration_resp_t tms_info;
@@ -1348,6 +1361,7 @@ void tms_registration_task(void *param)
         if (TMS_MAX_RETRIES != 0U && attempts >= TMS_MAX_RETRIES)
         {
             OSI_LOGE(TAG, "Maximum TMS registration attempts reached; task stopping");
+            s_tms_reg_in_progress = false;
             osiThreadExit();
             return;
         }
@@ -1379,5 +1393,6 @@ void tms_registration_task(void *param)
         audio_resource_play_combo_async_mid_priority("", "server-failed.mp3", NULL, 1);
     }
 
+    s_tms_reg_in_progress = false;
     osiThreadExit();
 }
