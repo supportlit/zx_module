@@ -6,6 +6,7 @@
 #include "customer_app_update.h"
 #include "framework_http.h"
 #include "framework_audio.h"
+#include "framework_network.h"
 #include "framework_log.h"
 #include "fs_api.h"
 #include "fota_api.h"
@@ -23,7 +24,7 @@
 
 #define OTA_STAGING_PATH        "D:/ota_staging.bin"
 #define OTA_TARGET_PATH         FUPDATE_APP_FILE_NAME  /* "D:/FOTA_APP.bin" */
-#define OTA_CHUNK_SIZE          (8 * 1024)
+#define OTA_CHUNK_SIZE          (32 * 1024)
 #define OTA_WORKER_STACK_SIZE   (24 * 1024)
 #define OTA_WORKER_PRIORITY     120
 #define OTA_MAX_CHUNK_RETRIES   3
@@ -186,6 +187,14 @@ static int prv_ota_download_file(const char *url, const char *save_path, uint32_
     // Step 1: Probe remote file size using Range: bytes=0-0
     uint32_t total_size = 0;
     for (int probe_retry = 0; probe_retry < 3; probe_retry++) {
+        if (probe_retry > 0) {
+            int net_wait = 0;
+            while ((!framework_network_is_connected() || !framework_network_is_pdp_activated()) && net_wait < 15) {
+                OSI_LOGW(TAG, "OTA: Waiting for cellular PDP connection before probe retry... (%d/15)", net_wait + 1);
+                osiThreadSleep(2000);
+                net_wait++;
+            }
+        }
         httpclient_t client = {0};
         httpclient_data_t client_data = {0};
         memset(hdr_buf, 0, 1024);
@@ -256,6 +265,17 @@ static int prv_ota_download_file(const char *url, const char *save_path, uint32_
             chunk = OTA_CHUNK_SIZE;
         }
 
+        // Wait for cellular network and PDP context to be ready before starting chunk
+        if (!framework_network_is_connected() || !framework_network_is_pdp_activated()) {
+            int net_wait = 0;
+            while ((!framework_network_is_connected() || !framework_network_is_pdp_activated()) && net_wait < 15) {
+                OSI_LOGW(TAG, "OTA: Waiting for cellular PDP connection before offset %lu... (%d/15)",
+                         (unsigned long)offset, net_wait + 1);
+                osiThreadSleep(2000);
+                net_wait++;
+            }
+        }
+
         char range_header[128];
         snprintf(range_header, sizeof(range_header),
                  "Range: bytes=%lu-%lu\r\nAccept: */*\r\nConnection: close\r\n",
@@ -266,6 +286,14 @@ static int prv_ota_download_file(const char *url, const char *save_path, uint32_
             if (retry > 0) {
                 OSI_LOGW(TAG, "OTA: Retrying chunk offset %lu (attempt %d/%d)",
                          (unsigned long)offset, retry + 1, OTA_MAX_CHUNK_RETRIES);
+
+                // Wait for cellular/PDP reconnect if network glitched during download
+                int net_wait = 0;
+                while ((!framework_network_is_connected() || !framework_network_is_pdp_activated()) && net_wait < 15) {
+                    OSI_LOGW(TAG, "OTA: Cellular/PDP reconnecting, waiting... (%d/15)", net_wait + 1);
+                    osiThreadSleep(2000);
+                    net_wait++;
+                }
                 osiThreadSleep(1000);
             }
 

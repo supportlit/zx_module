@@ -45,7 +45,7 @@
 // TEMPLATE_CERTS_DIR_PATH "cis-soundbox-private.pem.key"
 
 // #define MQTT_BROKER_HOST        "iot-dev.template.com"
-#define MQTT_BROKER_HOST "a3e38vloi5hkal-ats.iot.ap-south-1.amazonaws.com"
+#define MQTT_BROKER_HOST "a1ha6sbciuji3v-ats.iot.ap-southeast-2.amazonaws.com"
 #define MQTT_BROKER_PORT 8883
 #define MQTT_USE_TLS 0
 #define MQTT_KEEPALIVE_SEC 60
@@ -1566,7 +1566,7 @@ static void template_handle_server_message(const char *topic,
         params.has_campaign = has_campaign;
         strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
         strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
-        strncpy(params.language, lang_str, sizeof(params.language) - 1);
+        // strncpy(params.language, lang_str, sizeof(params.language) - 1);
 
         int ret = customer_payment_broadcast(&params);
         if (ret != 0)

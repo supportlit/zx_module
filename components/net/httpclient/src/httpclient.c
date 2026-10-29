@@ -90,6 +90,12 @@ static int _httpTcp_conn(httpclient_t *client, char *host){
             continue;
         }
 
+        struct timeval con_tv;
+        con_tv.tv_sec = 15;
+        con_tv.tv_usec = 0;
+        setsockopt(client->socket, SOL_SOCKET, SO_SNDTIMEO, &con_tv, sizeof(con_tv));
+        setsockopt(client->socket, SOL_SOCKET, SO_RCVTIMEO, &con_tv, sizeof(con_tv));
+
         if ( connect( client->socket, cur->ai_addr, (int)cur->ai_addrlen ) == 0 ) {
             ret = 0;
             break;
@@ -257,6 +263,12 @@ int _HttpNetConnect( mbedtls_net_context *ctx, const char *host,
             ret = MBEDTLS_ERR_NET_SOCKET_FAILED;
             continue;
         }
+
+        struct timeval con_tv;
+        con_tv.tv_sec = 15;
+        con_tv.tv_usec = 0;
+        setsockopt(ctx->fd, SOL_SOCKET, SO_SNDTIMEO, &con_tv, sizeof(con_tv));
+        setsockopt(ctx->fd, SOL_SOCKET, SO_RCVTIMEO, &con_tv, sizeof(con_tv));
 
         if( connect( ctx->fd, cur->ai_addr,cur->ai_addrlen ) == 0 )
         {

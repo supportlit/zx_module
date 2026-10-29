@@ -11,6 +11,7 @@
 #include "framework_http.h"
 #include "framework_unzip.h"
 #include "framework_device_config.h"
+#include "framework_network.h"
 #include "framework_log.h"
 #include "framework_audio.h"
 #include "fs_api.h"
@@ -771,7 +772,7 @@ static int prv_resolve_zip_download(lang_zip_info_t *entry, const char *zip_path
     return -6;
 }
 
-#define LANG_DOWNLOAD_CHUNK_SIZE (8 * 1024)
+#define LANG_DOWNLOAD_CHUNK_SIZE (32 * 1024)
 
 static int prv_download_zip_direct(const char *url, const char *zip_path, uint32_t expected_size)
 {
@@ -847,6 +848,19 @@ static int prv_download_zip_direct(const char *url, const char *zip_path, uint32
                 chunk = LANG_DOWNLOAD_CHUNK_SIZE;
             }
 
+            // Wait for cellular network and PDP context to be ready before starting chunk
+            if (!framework_network_is_connected() || !framework_network_is_pdp_activated())
+            {
+                int net_wait = 0;
+                while ((!framework_network_is_connected() || !framework_network_is_pdp_activated()) && net_wait < 15)
+                {
+                    OSI_LOGW(TAG, "[DL-DIRECT] Waiting for cellular PDP connection before offset %lu... (%d/15)",
+                             (unsigned long)offset, net_wait + 1);
+                    osiThreadSleep(2000);
+                    net_wait++;
+                }
+            }
+
             char range_header[128];
             snprintf(range_header, sizeof(range_header),
                      "Range: bytes=%lu-%lu\r\nAccept: */*\r\nConnection: close\r\n",
@@ -859,6 +873,15 @@ static int prv_download_zip_direct(const char *url, const char *zip_path, uint32
                 {
                     OSI_LOGW(TAG, "[DL-DIRECT] Retrying chunk %lu-%lu (attempt %d/3)",
                              (unsigned long)offset, (unsigned long)(offset + chunk - 1), retry + 1);
+
+                    // Wait for cellular/PDP reconnect if network glitched during download
+                    int net_wait = 0;
+                    while ((!framework_network_is_connected() || !framework_network_is_pdp_activated()) && net_wait < 15)
+                    {
+                        OSI_LOGW(TAG, "[DL-DIRECT] Cellular/PDP reconnecting, waiting... (%d/15)", net_wait + 1);
+                        osiThreadSleep(2000);
+                        net_wait++;
+                    }
                     osiThreadSleep(1000);
                 }
 
