@@ -1579,20 +1579,7 @@ static void template_handle_server_message(const char *topic,
         int ret = customer_payment_broadcast(&params);
         if (ret != 0)
         {
-          payment_callback_t callback = {0};
-          strncpy(callback.serial_number, sn, sizeof(callback.serial_number) - 1);
-          strncpy(callback.status, "0", sizeof(callback.status) - 1);
-          strncpy(callback.transaction_id, transaction_id, sizeof(callback.transaction_id) - 1);
-          strncpy(callback.amount, amount_str, sizeof(callback.amount) - 1);
-          strncpy(callback.language, lang_str, sizeof(callback.language) - 1);
-          strncpy(callback.reason, "Broadcast failed", sizeof(callback.reason) - 1);
-          osiTime_t now = {0};
-          osiGetTime(&now);
-          snprintf(callback.sound_played_datetime, sizeof(callback.sound_played_datetime),
-                   "%04d-%02d-%02d %02d:%02d:%02d",
-                   now.tm_year, now.tm_mon, now.tm_mday,
-                   now.tm_hour, now.tm_min, now.tm_sec);
-          customer_status_report_payment(&callback);
+          OSI_LOGE(TAG, "[PIPE-PAYMENT] Broadcast failed: ret=%d", ret);
         }
         return;
       }
@@ -1697,20 +1684,7 @@ static void template_handle_server_message(const char *topic,
       int ret = customer_payment_broadcast(&params);
       if (ret != 0)
       {
-        payment_callback_t callback = {0};
-        strncpy(callback.serial_number, sn, sizeof(callback.serial_number) - 1);
-        strncpy(callback.status, "0", sizeof(callback.status) - 1);
-        strncpy(callback.transaction_id, transaction_id, sizeof(callback.transaction_id) - 1);
-        strncpy(callback.amount, amount_str, sizeof(callback.amount) - 1);
-        strncpy(callback.language, lang_str, sizeof(callback.language) - 1);
-        strncpy(callback.reason, "Broadcast failed", sizeof(callback.reason) - 1);
-        osiTime_t now = {0};
-        osiGetTime(&now);
-        snprintf(callback.sound_played_datetime, sizeof(callback.sound_played_datetime),
-                 "%04d-%02d-%02d %02d:%02d:%02d",
-                 now.tm_year, now.tm_mon, now.tm_mday,
-                 now.tm_hour, now.tm_min, now.tm_sec);
-        customer_status_report_payment(&callback);
+        OSI_LOGE(TAG, "[JSON-PAYMENT] Broadcast failed: ret=%d", ret);
       }
       cJSON_Delete(root);
       return;

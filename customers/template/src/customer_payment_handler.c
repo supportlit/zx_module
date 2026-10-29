@@ -868,28 +868,51 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
     s_pending_has_campaign = params->has_campaign;
     customer_campaign_set_playback_requested(params->has_campaign);
 
-    if (!is_replay) {
-        s_total_txn_count++; // add by vipin: increment transaction count for new payment
-        s_last_txn_count = s_total_txn_count;
-        char pending_amt_buf[16] = {0};
-        if (params->amount_str[0] != '\0') {
-            strncpy(pending_amt_buf, params->amount_str, sizeof(pending_amt_buf) - 1);
-        } else {
-            snprintf(pending_amt_buf, sizeof(pending_amt_buf), "%.2f", params->total_amount);
-        }
-        const char *chosen_lang = (params->language[0] != '\0') ? params->language : customer_get_default_language();
-        prv_pending_payment_push(params->transaction_id, pending_amt_buf, chosen_lang, params->has_campaign);
-    }
-
     audio_list = (char *)malloc(MAX_AUDIO_LIST_SIZE);
     if (!audio_list) {
         FRAMEWORK_LOG("Failed to allocate audio list buffer");
+        if (!is_replay && params->transaction_id[0] != '\0') {
+            payment_callback_t cb = {0};
+            char sn[32] = {0};
+            framework_device_config_get_sn(sn, sizeof(sn));
+            strncpy(cb.serial_number, sn, sizeof(cb.serial_number) - 1);
+            strncpy(cb.status, "0", sizeof(cb.status) - 1);
+            strncpy(cb.transaction_id, params->transaction_id, sizeof(cb.transaction_id) - 1);
+            strncpy(cb.amount, params->amount_str, sizeof(cb.amount) - 1);
+            strncpy(cb.language, lang_str, sizeof(cb.language) - 1);
+            strncpy(cb.reason, "Audio list alloc failed", sizeof(cb.reason) - 1);
+            osiTime_t now = {0};
+            osiGetTime(&now);
+            snprintf(cb.sound_played_datetime, sizeof(cb.sound_played_datetime),
+                     "%04d-%02d-%02d %02d:%02d:%02d",
+                     now.tm_year, now.tm_mon, now.tm_mday,
+                     now.tm_hour, now.tm_min, now.tm_sec);
+            customer_status_report_payment(&cb);
+        }
         return -1;
     }
     ret = prv_generate_amount_audio_list(params, audio_list, MAX_AUDIO_LIST_SIZE);
     if (ret != 0) {
         FRAMEWORK_LOG("Failed to generate audio list");
         free(audio_list);
+        if (!is_replay && params->transaction_id[0] != '\0') {
+            payment_callback_t cb = {0};
+            char sn[32] = {0};
+            framework_device_config_get_sn(sn, sizeof(sn));
+            strncpy(cb.serial_number, sn, sizeof(cb.serial_number) - 1);
+            strncpy(cb.status, "0", sizeof(cb.status) - 1);
+            strncpy(cb.transaction_id, params->transaction_id, sizeof(cb.transaction_id) - 1);
+            strncpy(cb.amount, params->amount_str, sizeof(cb.amount) - 1);
+            strncpy(cb.language, lang_str, sizeof(cb.language) - 1);
+            strncpy(cb.reason, "Audio list gen failed", sizeof(cb.reason) - 1);
+            osiTime_t now = {0};
+            osiGetTime(&now);
+            snprintf(cb.sound_played_datetime, sizeof(cb.sound_played_datetime),
+                     "%04d-%02d-%02d %02d:%02d:%02d",
+                     now.tm_year, now.tm_mon, now.tm_mday,
+                     now.tm_hour, now.tm_min, now.tm_sec);
+            customer_status_report_payment(&cb);
+        }
         return -1;
     }
     size_t len = strlen(audio_list);
@@ -936,7 +959,23 @@ static int prv_customer_payment_broadcast_internal(const payment_broadcast_param
 #else
     prvLcdSecCodeSet((long)(params->rupees > 0 ? params->rupees : params->amount));
 #endif
-    ret = audio_resource_play_combo_async_mid_priority(PAYMENT_AUDIO_FOLDER, audio_list, prv_payment_audio_playback_callback, 0);
+
+    audio_playback_callback_t cb = NULL;
+    if (!is_replay) {
+        s_total_txn_count++; // add by vipin: increment transaction count for new payment
+        s_last_txn_count = s_total_txn_count;
+        char pending_amt_buf[16] = {0};
+        if (params->amount_str[0] != '\0') {
+            strncpy(pending_amt_buf, params->amount_str, sizeof(pending_amt_buf) - 1);
+        } else {
+            snprintf(pending_amt_buf, sizeof(pending_amt_buf), "%.2f", params->total_amount);
+        }
+        const char *chosen_lang = (params->language[0] != '\0') ? params->language : customer_get_default_language();
+        prv_pending_payment_push(params->transaction_id, pending_amt_buf, chosen_lang, params->has_campaign);
+        cb = prv_payment_audio_playback_callback;
+    }
+
+    ret = audio_resource_play_combo_async_mid_priority(PAYMENT_AUDIO_FOLDER, audio_list, cb, 0);
     free(audio_list);
     if (ret != 0) {
         FRAMEWORK_LOG("Failed to play payment combo (err=%d)", ret);
