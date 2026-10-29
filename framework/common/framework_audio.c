@@ -64,7 +64,15 @@ typedef struct {
  */
 #define AUDIO_LANG_PREFIX_FILE    "D:/audio_lang_prefix.bin"
 #define AUDIO_LANG_PREFIX_MAGIC   0x4c504658u /* 'LPFX' */
+#if __has_include("soundbox_language.h")
+#include "soundbox_language.h"
+#endif
+
+#if defined(SOUNDBOX_DEFAULT_AUDIO_FOLDER)
+#define AUDIO_LANG_PREFIX_DEFAULT SOUNDBOX_DEFAULT_AUDIO_FOLDER
+#else
 #define AUDIO_LANG_PREFIX_DEFAULT "D:/ENG/"
+#endif
 
 typedef struct {
     uint32_t magic;

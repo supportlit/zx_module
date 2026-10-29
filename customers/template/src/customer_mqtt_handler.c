@@ -1573,7 +1573,7 @@ static void template_handle_server_message(const char *topic,
         strncpy(params.transaction_id, transaction_id, sizeof(params.transaction_id) - 1);
         strncpy(params.amount_str, amount_str, sizeof(params.amount_str) - 1);
         if (lang_str && lang_str[0] != '\0') {
-          strncpy(params.language, lang_str, sizeof(params.language) - 1);
+         // strncpy(params.language, lang_str, sizeof(params.language) - 1);
         }
 
         int ret = customer_payment_broadcast(&params);

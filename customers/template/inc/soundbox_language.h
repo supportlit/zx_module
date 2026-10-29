@@ -34,7 +34,18 @@ typedef enum
 /**
  * @brief Default soundbox audio language for fresh boot initialization
  */
-#define SOUNDBOX_DEFAULT_LANGUAGE LANGUAGE_ENGLISH
+#define SOUNDBOX_DEFAULT_LANGUAGE LANGUAGE_HINDI
+
+/**
+ * @brief Default audio folder prefix derived automatically from SOUNDBOX_DEFAULT_LANGUAGE
+ */
+#if (SOUNDBOX_DEFAULT_LANGUAGE == LANGUAGE_HINDI)
+    #define SOUNDBOX_DEFAULT_AUDIO_FOLDER HINDI_AUDIO_FOLDER
+#elif (SOUNDBOX_DEFAULT_LANGUAGE == LANGUAGE_ENGLISH)
+    #define SOUNDBOX_DEFAULT_AUDIO_FOLDER ENGLISH_AUDIO_FOLDER
+#else
+    #define SOUNDBOX_DEFAULT_AUDIO_FOLDER ENGLISH_AUDIO_FOLDER
+#endif
 
 /**
  * @brief Check if language.txt exists during boot; create it if missing with default language

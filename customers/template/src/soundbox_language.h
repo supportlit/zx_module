@@ -1,139 +1,15 @@
 /**
  * @file soundbox_language.h
- * @brief Soundbox Language Management and Audio Selection
- */
-
-#ifndef _SOUNDBOX_LANGUAGE_H_
-#define _SOUNDBOX_LANGUAGE_H_
-
-#include <stdint.h>
-#include <stdbool.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#define TEMPLATE_LANGUAGE_FILE_PATH     "D:/language.txt"
-#define TEMPLATE_LANGUAGE_FILE_FALLBACK "language.txt"
-
-#define ENGLISH_AUDIO_FOLDER "D:/ENG/"
-#define HINDI_AUDIO_FOLDER   "D:/HI/"
-
-/**
- * @brief Supported Soundbox languages
- */
-typedef enum
-{
-    LANGUAGE_ENGLISH  = 0,
-    LANGUAGE_HINDI    = 1,
-    LANGUAGE_MARATHI  = 3,
-    LANGUAGE_GUJARATI = 4,
-    LANGUAGE_TAMIL    = 7
-} soundbox_language_t;
-
-/**
- * @brief Default soundbox audio language for fresh boot initialization
- */
-#define SOUNDBOX_DEFAULT_LANGUAGE LANGUAGE_ENGLISH
-
-/**
- * @brief Check if language.txt exists during boot; create it if missing with default language
+ * @brief Forwarding header to customers/template/inc/soundbox_language.h
  *
- * @return 0 on success (file exists or created successfully), negative error code on failure
+ * NOTE: All language definitions and configuration reside in
+ * customers/template/inc/soundbox_language.h. Edit that file as the single
+ * source of truth.
  */
-int soundbox_ensure_language_file_exists(void);
 
-/**
- * @brief Load language setting from TEMPLATE_LANGUAGE_FILE_PATH (D:/language.txt)
- *
- * @param language Output pointer to receive the validated language enum (or fallback)
- * @return 0 on success, negative error code on failure/fallback
- */
-int soundbox_load_language(soundbox_language_t *language);
+#ifndef _SOUNDBOX_LANGUAGE_SRC_FORWARD_H_
+#define _SOUNDBOX_LANGUAGE_SRC_FORWARD_H_
 
-/**
- * @brief Get the currently active soundbox language enum
- *
- * @return Active soundbox_language_t
- */
-soundbox_language_t soundbox_get_language(void);
+#include "../inc/soundbox_language.h"
 
-/**
- * @brief Set the active soundbox language and apply audio folder prefix
- *
- * @param lang Language enum to set
- * @param save_to_file If true, persist numeric code to D:/language.txt
- * @return 0 on success, negative error code if invalid or folder not configured
- */
-int soundbox_set_language(soundbox_language_t lang, bool save_to_file);
-
-/**
- * @brief Get audio folder path for a given language
- *
- * @param lang Language enum
- * @return Pointer to folder string (e.g. "D:/ENG/"), or NULL if not configured
- */
-const char *soundbox_get_audio_folder(soundbox_language_t lang);
-
-/**
- * @brief Get current audio folder path for active language
- *
- * @return Active audio folder path (e.g. "D:/ENG/" or "D:/HI/")
- */
-const char *soundbox_get_current_audio_folder(void);
-
-/**
- * @brief Convert soundbox_language_t to 2-letter string code ("EN", "HI", etc.)
- *
- * @param lang Language enum
- * @return String code
- */
-const char *soundbox_language_to_str(soundbox_language_t lang);
-
-/**
- * @brief Convert soundbox_language_t to numeric string code ("0", "1", etc.)
- *
- * @param lang Language enum
- * @return Numeric string code
- */
-const char *soundbox_language_to_numeric_str(soundbox_language_t lang);
-
-/**
- * @brief Get English descriptive name for language
- *
- * @param lang Language enum
- * @return Human readable language name
- */
-const char *soundbox_language_name(soundbox_language_t lang);
-
-/**
- * @brief Parse string ("0", "1", "EN", "HI", etc.) into soundbox_language_t
- *
- * @param str Input string
- * @param out_lang Output language enum pointer
- * @return true if valid and recognized, false otherwise
- */
-bool soundbox_str_to_language(const char *str, soundbox_language_t *out_lang);
-
-/**
- * @brief Validate that the required welcome audio resource exists for the given language
- *
- * Checks for existence of welcome audio resource in the language's audio folder.
- * Validates 'wel' (file or non-empty directory), 'wel.mp3', 'wel.wav', 'welcome.mp3',
- * or canonical startup welcome audio ('id_welcome_to_template.mp3').
- *
- * @param lang Language enum to validate
- * @return true if valid welcome audio resource exists and is accessible, false otherwise
- */
-bool soundbox_validate_welcome_audio(soundbox_language_t lang);
-
-/**
- * @brief Initialize language subsystem on Soundbox startup
- */
-void soundbox_language_init(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* _SOUNDBOX_LANGUAGE_H_ */
+#endif /* _SOUNDBOX_LANGUAGE_SRC_FORWARD_H_ */

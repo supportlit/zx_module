@@ -384,7 +384,7 @@ const char *soundbox_get_current_audio_folder(void)
     if (folder != NULL) {
         return folder;
     }
-    return ENGLISH_AUDIO_FOLDER; // Safe fallback if unconfigured language
+    return SOUNDBOX_DEFAULT_AUDIO_FOLDER; // Automatically matches SOUNDBOX_DEFAULT_LANGUAGE
 }
 
 int soundbox_set_language(soundbox_language_t lang, bool save_to_file)
@@ -466,9 +466,9 @@ void soundbox_language_init(void)
         OSI_LOGI(TAG, "[LANG-INIT] Audio subsystem prefix initialized to '%s' (Language: %s)",
                  folder, soundbox_language_name(s_active_language));
     } else {
-        audio_resource_set_language_prefix(ENGLISH_AUDIO_FOLDER);
+        audio_resource_set_language_prefix(SOUNDBOX_DEFAULT_AUDIO_FOLDER);
         OSI_LOGW(TAG, "[LANG-INIT] Language %s (%d) has no configured audio folder. Fallback playback to %s",
-                 soundbox_language_name(s_active_language), (int)s_active_language, ENGLISH_AUDIO_FOLDER);
+                 soundbox_language_name(s_active_language), (int)s_active_language, SOUNDBOX_DEFAULT_AUDIO_FOLDER);
     }
 
     prv_lang_unlock();

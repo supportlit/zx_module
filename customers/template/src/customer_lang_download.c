@@ -38,6 +38,7 @@
 #define LANG_DOWNLOAD_TIMEOUT_MS 60000
 #define LANG_UNZIP_TIMEOUT_MS 60000
 #define LANG_HTTP_TIMEOUT_MS 30000
+#define LANG_DOWNLOAD_CHUNK_SIZE (32 * 1024)
 
 typedef struct
 {
@@ -709,45 +710,275 @@ static int prv_resolve_zip_download(lang_zip_info_t *entry, const char *zip_path
 
     OSI_LOGI(TAG, "[PROD-DL] Querying %s (length=%u)", LANG_DOWNLOAD_FILE_URL, (unsigned int)strlen(body));
     log_string_in_chunks_with_label(TAG, "LANG_DOWNLOAD_REQ", body);
-    s_mgr.http_result = -1;
-    s_mgr.http_status_code = 0;
-    int ret = framework_http_post_json(LANG_DOWNLOAD_FILE_URL, body, NULL, prv_http_req_callback, NULL);
-    cJSON_free(body);
-    if (ret != 0)
+
+    // Wait for cellular network and PDP context to be ready
+    if (!framework_network_is_connected() || !framework_network_is_pdp_activated())
     {
-        OSI_LOGE(TAG, "[PROD-DL] Failed to post DownloadLanguageFile request (%d)", ret);
+        int net_wait = 0;
+        while ((!framework_network_is_connected() || !framework_network_is_pdp_activated()) && net_wait < 15)
+        {
+            OSI_LOGW(TAG, "[PROD-DL] Waiting for cellular PDP connection... (%d/15)", net_wait + 1);
+            osiThreadSleep(2000);
+            net_wait++;
+        }
+    }
+
+    char *buf = (char *)malloc(LANG_DOWNLOAD_CHUNK_SIZE + 1);
+    if (!buf)
+    {
+        OSI_LOGE(TAG, "[PROD-DL] Failed to allocate download chunk buffer");
+        cJSON_free(body);
         return -2;
     }
 
-    if (!osiSemaphoreTryAcquire(s_mgr.http_sem, LANG_HTTP_TIMEOUT_MS))
+    char *hdr_buf = (char *)malloc(1024);
+    if (!hdr_buf)
     {
-        OSI_LOGE(TAG, "[PROD-DL] DownloadLanguageFile query timed out");
+        OSI_LOGE(TAG, "[PROD-DL] Failed to allocate header buffer");
+        free(buf);
+        cJSON_free(body);
+        return -2;
+    }
+    memset(hdr_buf, 0, 1024);
+
+    httpclient_t client = {0};
+    httpclient_data_t client_data = {0};
+
+    client.header = "Accept: */*\r\nConnection: close\r\n";
+    client.verify_mode = 0;
+
+    client_data.post_buf = body;
+    client_data.post_buf_len = strlen(body);
+    client_data.post_content_type = "application/json";
+    client_data.header_buf = hdr_buf;
+    client_data.header_buf_len = 1024;
+    client_data.response_buf = buf;
+    client_data.response_buf_len = LANG_DOWNLOAD_CHUNK_SIZE + 1;
+
+    HTTPCLIENT_RESULT res = httpclient_connect(&client, LANG_DOWNLOAD_FILE_URL);
+    if (res != HTTPCLIENT_OK)
+    {
+        OSI_LOGE(TAG, "[PROD-DL] httpclient_connect failed: %d", (int)res);
+        free(hdr_buf);
+        free(buf);
+        cJSON_free(body);
         return -3;
     }
 
-    if (s_mgr.http_result != HTTP_RESULT_SUCCESS || s_mgr.http_status_code != 200 || !s_mgr.http_response_data)
+    res = httpclient_send_request(&client, LANG_DOWNLOAD_FILE_URL, HTTPCLIENT_POST, &client_data);
+    cJSON_free(body);
+    body = NULL;
+    if (res != HTTPCLIENT_OK)
     {
-        OSI_LOGE(TAG, "[PROD-DL] DownloadLanguageFile query failed (code=%d)", s_mgr.http_status_code);
+        OSI_LOGE(TAG, "[PROD-DL] httpclient_send_request failed: %d", (int)res);
+        httpclient_close(&client);
+        free(hdr_buf);
+        free(buf);
+        return -3;
+    }
+
+    res = httpclient_recv_response(&client, &client_data);
+    int resp_code = client.response_code;
+
+    // Handle redirects (301, 302, 307)
+    if ((resp_code == 301 || resp_code == 302 || resp_code == 307) && res >= 0)
+    {
+        int loc_pos = 0, loc_len = 0;
+        if (httpclient_get_response_header_value(hdr_buf, "Location", &loc_pos, &loc_len) == 0 &&
+            loc_len > 0 && loc_len < (int)max_url_len)
+        {
+            memcpy(out_download_url, hdr_buf + loc_pos, loc_len);
+            out_download_url[loc_len] = '\0';
+            strncpy(entry->url, out_download_url, sizeof(entry->url) - 1);
+            OSI_LOGI(TAG, "[PROD-DL] Redirected (%d) -> %s", resp_code, out_download_url);
+            httpclient_close(&client);
+            free(hdr_buf);
+            free(buf);
+            return 0;
+        }
+    }
+
+    if (resp_code < 200 || resp_code >= 300)
+    {
+        OSI_LOGE(TAG, "[PROD-DL] HTTP request failed with code %d, res=%d", resp_code, (int)res);
+        httpclient_close(&client);
+        free(hdr_buf);
+        free(buf);
         return -4;
     }
 
-    // Check if response is raw binary ZIP (starts with "PK")
-    if (s_mgr.http_response_len >= 4 &&
-        s_mgr.http_response_data[0] == 'P' &&
-        s_mgr.http_response_data[1] == 'K')
+    if (res != HTTPCLIENT_OK && res != HTTPCLIENT_RETRIEVE_MORE_DATA)
     {
-        OSI_LOGI(TAG, "[PROD-DL] Response is direct binary ZIP (%u bytes)", s_mgr.http_response_len);
-        int fd = fs_open(zip_path, "wb+");
-        if (fd <= 0)
-            return -5;
-        fs_write(s_mgr.http_response_data, 1, s_mgr.http_response_len, fd);
-        fs_close(fd);
-        out_download_url[0] = '\0'; // Direct file saved
-        return 1;
+        OSI_LOGE(TAG, "[PROD-DL] Failed to receive initial response (res=%d)", (int)res);
+        httpclient_close(&client);
+        free(hdr_buf);
+        free(buf);
+        return -4;
     }
 
-    // Parse JSON for URL
-    cJSON *resp_json = cJSON_Parse(s_mgr.http_response_data);
+    // Determine bytes in first chunk
+    int first_chunk_len = 0;
+    if (res == HTTPCLIENT_RETRIEVE_MORE_DATA)
+    {
+        first_chunk_len = client_data.response_buf_len - 1;
+    }
+    else // res == HTTPCLIENT_OK
+    {
+        if (client_data.response_content_len > 0)
+        {
+            first_chunk_len = client_data.response_content_len;
+        }
+        else if (entry->size > 0)
+        {
+            first_chunk_len = entry->size;
+        }
+        else
+        {
+            first_chunk_len = strlen(buf);
+        }
+    }
+
+    // Check if response is raw binary ZIP (starts with "PK")
+    if (first_chunk_len >= 2 && buf[0] == 'P' && buf[1] == 'K')
+    {
+        OSI_LOGI(TAG, "[PROD-DL] Response is direct binary ZIP, streaming to %s", zip_path);
+        fs_remove(zip_path);
+        int fd = fs_open(zip_path, "wb+");
+        if (fd <= 0)
+        {
+            OSI_LOGE(TAG, "[PROD-DL] Failed to open %s for writing (fd=%d)", zip_path, fd);
+            httpclient_close(&client);
+            free(hdr_buf);
+            free(buf);
+            return -5;
+        }
+
+        while (audio_resource_is_playing())
+        {
+            osiThreadSleep(20);
+        }
+
+        size_t written = fs_write(buf, 1, first_chunk_len, fd);
+        if (written != (size_t)first_chunk_len)
+        {
+            OSI_LOGE(TAG, "[PROD-DL] Flash write error: wrote=%u, expected=%d", (unsigned)written, first_chunk_len);
+            fs_close(fd);
+            fs_remove(zip_path);
+            httpclient_close(&client);
+            free(hdr_buf);
+            free(buf);
+            return -5;
+        }
+
+        uint32_t total_written = written;
+        if (entry->size > 0)
+        {
+            int percent = (int)((total_written * 100ULL) / entry->size);
+            OSI_LOGI(TAG, "[PROD-DL] Streamed %lu/%lu bytes (%d%%)",
+                     (unsigned long)total_written, (unsigned long)entry->size, percent);
+        }
+
+        bool stream_ok = true;
+        while (res == HTTPCLIENT_RETRIEVE_MORE_DATA || client_data.is_more)
+        {
+            while (audio_resource_is_playing())
+            {
+                osiThreadSleep(20);
+            }
+
+            int prev_retrieve_len = client_data.retrieve_len;
+            res = httpclient_recv_response(&client, &client_data);
+            if (res != HTTPCLIENT_OK && res != HTTPCLIENT_RETRIEVE_MORE_DATA)
+            {
+                OSI_LOGE(TAG, "[PROD-DL] httpclient_recv_response chunk failed: %d", (int)res);
+                stream_ok = false;
+                break;
+            }
+
+            int chunk_len = 0;
+            if (res == HTTPCLIENT_RETRIEVE_MORE_DATA)
+            {
+                chunk_len = client_data.response_buf_len - 1;
+            }
+            else // res == HTTPCLIENT_OK
+            {
+                if (prev_retrieve_len > 0)
+                {
+                    chunk_len = prev_retrieve_len;
+                }
+                else if (client_data.response_content_len > 0 && (uint32_t)client_data.response_content_len >= total_written)
+                {
+                    chunk_len = client_data.response_content_len - total_written;
+                }
+                else if (entry->size > 0 && entry->size >= total_written)
+                {
+                    chunk_len = entry->size - total_written;
+                }
+            }
+
+            if (chunk_len <= 0)
+            {
+                if (res == HTTPCLIENT_OK)
+                    break;
+                OSI_LOGE(TAG, "[PROD-DL] Received non-positive chunk length (%d)", chunk_len);
+                stream_ok = false;
+                break;
+            }
+
+            written = fs_write(buf, 1, chunk_len, fd);
+            if (written != (size_t)chunk_len)
+            {
+                OSI_LOGE(TAG, "[PROD-DL] Flash write error: wrote=%u, expected=%d", (unsigned)written, chunk_len);
+                stream_ok = false;
+                break;
+            }
+            total_written += written;
+
+            if (entry->size > 0)
+            {
+                int percent = (int)((total_written * 100ULL) / entry->size);
+                OSI_LOGI(TAG, "[PROD-DL] Streamed %lu/%lu bytes (%d%%)",
+                         (unsigned long)total_written, (unsigned long)entry->size, percent);
+            }
+
+            if (res == HTTPCLIENT_OK)
+            {
+                break;
+            }
+        }
+
+        httpclient_close(&client);
+        fs_sync(fd);
+        fs_close(fd);
+        free(hdr_buf);
+        free(buf);
+
+        if (!stream_ok)
+        {
+            fs_remove(zip_path);
+            return -5;
+        }
+
+        if (entry->size > 0 && total_written != entry->size)
+        {
+            OSI_LOGE(TAG, "[PROD-DL] Size mismatch: written=%lu, expected=%lu",
+                     (unsigned long)total_written, (unsigned long)entry->size);
+            fs_remove(zip_path);
+            return -5;
+        }
+
+        OSI_LOGI(TAG, "[PROD-DL] Successfully saved direct binary ZIP (%lu bytes)", (unsigned long)total_written);
+        out_download_url[0] = '\0';
+        return 1; // Direct file saved!
+    }
+
+    // Otherwise, check for JSON response
+    buf[first_chunk_len] = '\0';
+    cJSON *resp_json = cJSON_Parse(buf);
+    httpclient_close(&client);
+    free(hdr_buf);
+    free(buf);
+
     if (resp_json)
     {
         cJSON *j_url = cJSON_GetObjectItem(resp_json, "url");
@@ -768,7 +999,7 @@ static int prv_resolve_zip_download(lang_zip_info_t *entry, const char *zip_path
         cJSON_Delete(resp_json);
     }
 
-    OSI_LOGE(TAG, "[PROD-DL] Could not resolve download URL or binary ZIP from response");
+    OSI_LOGE(TAG, "[PROD-DL] Response was neither binary ZIP nor valid URL JSON");
     return -6;
 }
 
@@ -1188,14 +1419,7 @@ static void prv_tms_lang_worker_task(void *param)
         const char *target_folder = soundbox_get_audio_folder(new_lang);
         if (!target_folder)
         {
-            if (strcmp(meta->newlanguage, "1") == 0)
-            {
-                target_folder = HINDI_AUDIO_FOLDER;
-            }
-            else
-            {
-                target_folder = ENGLISH_AUDIO_FOLDER;
-            }
+            target_folder = SOUNDBOX_DEFAULT_AUDIO_FOLDER;
         }
 
         OSI_LOGI(TAG, "[WORKFLOW] Deploying staging audio files to target folder: %s", target_folder);
