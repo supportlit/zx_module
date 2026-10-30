@@ -3,6 +3,7 @@
 #include "customer_config.h"
 #include "customer_payment_handler.h"
 #include "customer_status_report.h"
+#include "customer_tms_update.h"
 #include "framework_audio.h"
 #include "framework_device_config.h"
 #include "framework_http.h"
@@ -96,7 +97,8 @@ static const char *g_template_topics[] = {
     "BP1/%s/ota-update",
     "BP1/%s/restart",
     "BP1/%s/update-lang",
-    "BP1/%s/activation"};
+    "BP1/%s/activation",
+    "BP1/%s/tmsUpdate"};
 static char sn[32] = {0};
 static char sub_topic[8][128] = {0};
 
@@ -493,6 +495,9 @@ static void template_handle_server_message(const char *topic,
     OSI_LOGI(TAG, "[ACTIVATION] status=%s", status);
     audio_resource_play_combo_async_mid_priority(
         PAYMENT_AUDIO_FOLDER, "activation-device.mp3", NULL, 1);
+  } else if (strstr(topic, "/tmsUpdate")) {
+    OSI_LOGI(TAG, "[TMS] Received /tmsUpdate MQTT message, triggering TMS update...");
+    customer_tms_update_start();
   } else {
     OSI_LOGI(TAG, "Received message on unknown topic: %s", topic);
   }
@@ -502,8 +507,8 @@ static void template_handle_server_message(const char *topic,
 // MQTT message callback
 static int template_mqtt_message_handler(const char *topic, const char *payload,
                                          uint32_t payload_len) {
-  OSI_LOGI(TAG, "MQTT message: topic=%s, payload=%.*s", topic, payload_len,
-           payload);
+  OSI_LOGI(TAG, "MQTT message: topic=%s, len=%u", topic, (unsigned int)payload_len);
+  OSI_LOG_LONG_N(TAG, "MQTT_PAYLOAD", payload, payload_len);
   template_handle_server_message(topic, payload, payload_len);
   return 0; // Mark as handled
 }
@@ -533,7 +538,8 @@ static int customer_mqtt_message_handler(const char *topic, const char *payload,
                                          uint32_t payload_len) {
   if (!payload || payload_len == 0)
     return -1;
-  OSI_LOGI(TAG, "Received command: %.*s", (int)payload_len, payload);
+  OSI_LOGI(TAG, "Received command (topic=%s, len=%u):", topic, (unsigned int)payload_len);
+  OSI_LOG_LONG_N(TAG, "CMD_PAYLOAD", payload, payload_len);
   // TODO: 解析 payload 并调用 customer_payment_broadcast
   return 0;
 }

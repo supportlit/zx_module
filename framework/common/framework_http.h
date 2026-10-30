@@ -144,12 +144,15 @@ int framework_http_request_async(http_request_t *request, http_callback_t callba
  * @param user_data User data for callback
  * @return 0=success, negative=error
  */
+int framework_http_get(const char *url, const char *header, http_callback_t callback, void *user_data);
+
 int framework_http_post_json(const char *url, const char *body, const char *header,
                              http_callback_t callback, void *user_data);
 
 int framework_http_post_json_with_sni(const char *url, const char *body, const char *header,
                              http_callback_t callback, void *user_data, char *sni_host);
 
+int framework_http_download_file_callback_with_header(const char *url, const char *save_path, http_download_type_t type, const char *header, const char *expected_md5, http_download_callback_t callback, void *user_data);
 int framework_http_download_file_callback_with_md5(const char *url, const char *save_path, http_download_type_t type, const char *expected_md5, http_download_callback_t callback, void *user_data);
 int framework_http_download_file_callback(const char *url, const char *save_path, http_download_type_t type, http_download_callback_t callback, void *user_data);
 

@@ -4,6 +4,7 @@
  */
 
 #include "customer_status_report.h"
+#include "customer_pos_config.h"
 #include "framework_mqtt.h"
 #include "framework_log.h"
 #include "framework_battery.h"
@@ -95,7 +96,8 @@ static int prv_publish_json(const char *topic, cJSON *json)
     if (ret != 0) {
         OSI_LOGE(TAG, "Failed to publish to %s: %d", topic, ret);
     } else {
-        OSI_LOGI(TAG, "Published to %s: %s", topic, payload);
+        OSI_LOGI(TAG, "Published to %s (len=%u):", topic, (unsigned int)strlen(payload));
+        OSI_LOG_LONG(TAG, "PUB_PAYLOAD", payload);
     }
 
     cJSON_free(payload);
@@ -421,13 +423,18 @@ static void prv_tms_hb_http_callback(http_response_t *response, void *user_data)
     }
 
     if (response->result == HTTP_RESULT_SUCCESS && response->status_code == 200) {
-        OSI_LOGI(TAG, "[TMS_HB] Heartbeat SUCCESS [HTTP %d, len=%u]: %.64s",
+        OSI_LOGI(TAG, "[TMS_HB] Heartbeat SUCCESS [HTTP %d, len=%u]:",
                  response->status_code,
-                 (unsigned int)response->response_len,
-                 response->response_data ? response->response_data : "");
+                 (unsigned int)response->response_len);
+        if (response->response_data) {
+            OSI_LOG_LONG(TAG, "HB_RESP", response->response_data);
+        }
     } else {
-        OSI_LOGE(TAG, "[TMS_HB] Heartbeat FAILED [Result: %d, HTTP Code: %d]",
+        OSI_LOGE(TAG, "[TMS_HB] Heartbeat FAILED [Result: %d, HTTP Code: %d]:",
                  response->result, response->status_code);
+        if (response->response_data) {
+            OSI_LOG_LONG(TAG, "HB_RESP", response->response_data);
+        }
     }
 }
 
@@ -438,10 +445,19 @@ int customer_send_tms_heartbeat(void)
         return -1;
     }
 
-    char sn[32] = {0};
+    char sn[64] = {0};
     framework_device_config_get_sn(sn, sizeof(sn));
+    const char *modem_imei = framework_network_get_imei();
+    if (!modem_imei || strlen(modem_imei) == 0) {
+        modem_imei = "000000000000000";
+    }
+
     if (strlen(sn) == 0) {
-        strncpy(sn, TMS_HEARTBEAT_TID, sizeof(sn) - 1);
+        if (strcmp(modem_imei, "000000000000000") != 0) {
+            snprintf(sn, sizeof(sn), "BP02%s", modem_imei);
+        } else {
+            strncpy(sn, TMS_HEARTBEAT_TID, sizeof(sn) - 1);
+        }
     }
 
     const char *iccid = framework_network_get_iccid();
@@ -459,6 +475,28 @@ int customer_send_tms_heartbeat(void)
     } else {
         strncpy(act_date, "2026/09/24 18:48:13 +22 0", sizeof(act_date) - 1);
     }
+
+    /* Dynamic Real Hardware & Status Info */
+    const char *act_status = framework_network_is_connected() ? "REGISTERED" : "UNREGISTERED";
+    const char *tstatus = framework_mqtt_is_connected() ? "Active" : "Idle";
+    const char *model = APP_PRODUCT_MODEL;
+    const char *fw_ver = TMS_HEARTBEAT_FIRMWARE_VER;
+    const char *app_ver = TMS_HEARTBEAT_APP_VER;
+
+    const char *mid = customer_pos_config_get_mid();
+    if (!mid || strlen(mid) == 0) {
+        mid = TMS_HEARTBEAT_MID;
+    }
+    const char *tid = customer_pos_config_get_tid();
+    if (!tid || strlen(tid) == 0) {
+        tid = TMS_HEARTBEAT_TID;
+    }
+
+    char cpu[64] = {0};
+    snprintf(cpu, sizeof(cpu), "ZX800_%s", modem_imei);
+
+    char did[64] = {0};
+    snprintf(did, sizeof(did), "0002%s", modem_imei);
 
     /* Allocate JSON body on heap to avoid stack overflow */
     char *json_body = (char *)malloc(1024);
@@ -491,20 +529,20 @@ int customer_send_tms_heartbeat(void)
         "    \"trsm\": \"\"\n"
         "}",
         act_date,
-        TMS_HEARTBEAT_ACT_STATUS,
+        act_status,
         TMS_HEARTBEAT_ANDROID_VER,
         TMS_HEARTBEAT_APK_VER,
-        TMS_HEARTBEAT_APP_VER,
+        app_ver,
         TMS_HEARTBEAT_CONFIG_VER,
-        TMS_HEARTBEAT_CPU,
-        TMS_HEARTBEAT_DID,
-        TMS_HEARTBEAT_FIRMWARE_VER,
-        TMS_HEARTBEAT_MID,
+        cpu,
+        did,
+        fw_ver,
+        mid,
         iccid,
         sn,
-        TMS_HEARTBEAT_TID,
-        TMS_HEARTBEAT_MODEL,
-        TMS_HEARTBEAT_TSTATUS
+        tid,
+        model,
+        tstatus
     );
 
     if (len < 0 || len >= 1024) {
@@ -515,7 +553,8 @@ int customer_send_tms_heartbeat(void)
 
     static const char *header = "Authorization: " TMS_HEARTBEAT_AUTH_TOKEN "\r\nContent-Type: application/json\r\n";
 
-    OSI_LOGI(TAG, "[TMS_HB] Sending HTTPS Heartbeat to %s (len=%d)", TMS_HEARTBEAT_URL, len);
+    OSI_LOGI(TAG, "[TMS_HB] Sending HTTPS Heartbeat to %s (len=%d):", TMS_HEARTBEAT_URL, len);
+    OSI_LOG_LONG(TAG, "HB_REQ", json_body);
 
     int ret = framework_http_post_json(
         TMS_HEARTBEAT_URL,

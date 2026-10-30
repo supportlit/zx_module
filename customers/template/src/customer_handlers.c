@@ -4,9 +4,11 @@
  */
 
 #include "customer_handlers.h"
+#include "customer_pos_config.h"
 #include "customer_mqtt_handler.h"
 #include "customer_payment_handler.h"
 #include "customer_status_report.h"
+#include "customer_tms_update.h"
 #include "customer_battery_config.h"
 #include "app_lcd.h"
 #include "framework_device_config.h"
@@ -32,7 +34,8 @@
 #include "fs_api.h"
 #include "mbedtls/md5.h"
 #include "at_api.h"
-
+#include <strings.h>
+#include "fota_api.h"
 #define TAG "TEMPLATE"
 
 #define LED_W1_PIN   54
@@ -904,6 +907,9 @@ int customer_msg_handler(framework_msg_t *msg)
         bk_led_on_net_well_server_connect();
         g_wifi_prov_in_progress = 0;
         // bk_led_on_net_ready(framework_network_get_bearer() == FRAMEWORK_NETWORK_BEARER_WIFI);
+        if (!customer_pos_config_is_ready()) {
+            customer_pos_config_fetch_async();
+        }
         customer_mqtt_network_ready();
         OSI_LOGI(TAG, "Initializing MQTT handler");
         int ret = customer_mqtt_init();
@@ -1075,6 +1081,7 @@ int customer_msg_handler(framework_msg_t *msg)
     case MSG_UNZIP_SUCCESS:
     case MSG_UNZIP_FAIL:
         template_mqtt_handle_unzip_msg(msg);
+        customer_tms_update_handle_unzip_msg(msg);
         return 0;
     default:
         break;
@@ -1113,6 +1120,7 @@ void customer_init(void)
     snprintf(imei, sizeof(imei), "BP02%s", framework_network_get_imei());
     OSI_LOGI(TAG, "Setting device SN to IMEI: %s", imei);
     framework_device_config_set_sn(imei);
+    customer_pos_config_init();
     if (customer_battery_config_register() != 0) {
         OSI_LOGE(0, "TEMPLATE: Failed to register battery config");
     } else {

@@ -100,9 +100,12 @@ typedef enum {
 #define LOG_E(fmt, ...)  OSI_LOGE(0, fmt, ##__VA_ARGS__)
 #define LOG_W(fmt, ...)  OSI_LOGW(0, fmt, ##__VA_ARGS__)
 #define LOG_I(fmt, ...)  OSI_LOGI(0, fmt, ##__VA_ARGS__)
-#define LOG_D(fmt, ...)  OSI_LOGD(0, fmt, ##__VA_ARGS__)
-
 void framework_log_buf_dump(const char *tag, const void *buffer, size_t length);
+void framework_log_text_chunks_len(const char *tag, const char *prefix, const char *str, size_t len, size_t chunk_size);
+void framework_log_text_chunks(const char *tag, const char *prefix, const char *str, size_t chunk_size);
+
+#define OSI_LOG_LONG(tag, prefix, str) framework_log_text_chunks(tag, prefix, str, 100)
+#define OSI_LOG_LONG_N(tag, prefix, str, len) framework_log_text_chunks_len(tag, prefix, str, len, 100)
 
 /* ============================================================================
  * 条件编译控制

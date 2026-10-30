@@ -105,7 +105,7 @@ static int prv_parse_md5_from_header(const char *val, int val_len, char *md5_out
     return -1;
 }
 
-static int httpclient_get_content_info(const char *url, int *content_length, char *content_md5, size_t content_md5_len)
+static int httpclient_get_content_info(const char *url, const char *header, int *content_length, char *content_md5, size_t content_md5_len)
 {
     if (!url || !content_length) {
         return -1;
@@ -115,8 +115,12 @@ static int httpclient_get_content_info(const char *url, int *content_length, cha
     char header_buf[HTTP_MAX_HEADER_LEN] = {0};
     client_data.header_buf = header_buf;
     client_data.header_buf_len = sizeof(header_buf);
+    if (header && strlen(header) > 0) {
+        client.header = (char *)header;
+    }
     int ret = httpclient_head(&client, (char *)url, &client_data);
     if (ret != HTTPCLIENT_OK) {
+        OSI_LOGE(TAG, "httpclient_head failed, ret=%d, status=%d", ret, client.response_code);
         return -2;
     }
     int val_pos = 0;
@@ -324,10 +328,17 @@ static void prv_send_download_msg(uint32_t msg_id, http_download_type_t type, in
     framework_msg_send(&msg);
 }
 
-static int prv_download_file_task(const char *url, const char *save_path, http_download_type_t type, const char *expected_md5, void *arg, http_download_callback_t callback)
+static int prv_download_file_task(const char *url, const char *save_path, http_download_type_t type, const char *header, const char *expected_md5, void *arg, http_download_callback_t callback)
 {
     if (!url || !save_path) {
         return -1;
+    }
+
+    /* Auto-add Authorization header for TMS server downloads if not specified */
+    char auto_header[128] = {0};
+    if ((!header || strlen(header) == 0) && (strstr(url, "103.157.22.211") || strstr(url, "sxtms"))) {
+        snprintf(auto_header, sizeof(auto_header), "Authorization: f1c3a7e8b9d5e2a0dh7d8f9dh97d\r\n");
+        header = auto_header;
     }
 
     char info_path[128];
@@ -338,7 +349,7 @@ static int prv_download_file_task(const char *url, const char *save_path, http_d
 
     int total_size = 0;
     char remote_md5[33] = {0};
-    if (httpclient_get_content_info(url, &total_size, remote_md5, sizeof(remote_md5)) != 0 || total_size <= 0) {
+    if (httpclient_get_content_info(url, header, &total_size, remote_md5, sizeof(remote_md5)) != 0 || total_size <= 0) {
         prv_send_download_msg(MSG_HTTP_DOWNLOAD_FAIL, type, 0, -4, save_path);
         if(callback){callback(MSG_HTTP_DOWNLOAD_FAIL, save_path, arg);} 
         return -4;
@@ -435,9 +446,13 @@ static int prv_download_file_task(const char *url, const char *save_path, http_d
         memset(&client, 0, sizeof(client));
         memset(&client_data, 0, sizeof(client_data));
         int chunk = (total_size - offset > HTTP_DOWNLOAD_CHUNK_SIZE) ? HTTP_DOWNLOAD_CHUNK_SIZE : (total_size - offset);
-        char range_header[64];
-        snprintf(range_header, sizeof(range_header), "Range: bytes=%d-%d\r\n", offset, offset + chunk - 1);
-        OSI_LOGI(0, "requesting range %s", range_header);
+        char range_header[192];
+        if (header && strlen(header) > 0) {
+            snprintf(range_header, sizeof(range_header), "Range: bytes=%d-%d\r\n%s", offset, offset + chunk - 1, header);
+        } else {
+            snprintf(range_header, sizeof(range_header), "Range: bytes=%d-%d\r\n", offset, offset + chunk - 1);
+        }
+        OSI_LOGI(0, "requesting range bytes=%d-%d (chunk=%d)", offset, offset + chunk - 1, chunk);
         client.header = range_header;
         client_data.response_buf = buf;
         client_data.response_buf_len = chunk + 1;
@@ -535,6 +550,7 @@ typedef struct {
             char expected_md5[33];
             void *user_data;                        /* User data passed to callback */
             http_download_callback_t download_callback;
+            char header[HTTP_MAX_HEADER_LEN];
         } download;
     } payload;
 } http_request_item_t;
@@ -555,12 +571,12 @@ static void prv_execute_http_job(http_request_item_t *item)
     }
 
     if (item->job_type == HTTP_JOB_TYPE_DOWNLOAD) {
-        OSI_LOGI(TAG , " Executing HTTP download: %s -> %s",
-                 item->payload.download.url,
-                 item->payload.download.save_path);
+        OSI_LOGI(TAG , " Executing HTTP download -> %s", item->payload.download.save_path);
+        OSI_LOG_LONG(TAG, "DOWNLOAD_URL", item->payload.download.url);
         prv_download_file_task(item->payload.download.url,
                        item->payload.download.save_path,
                        item->payload.download.type,
+                       item->payload.download.header,
                        item->payload.download.expected_md5,
                        item->payload.download.user_data,
                        item->payload.download.download_callback);
@@ -581,7 +597,8 @@ static void prv_execute_http_job(http_request_item_t *item)
     char *response_buf = NULL;
     char *header_buf = NULL;
 
-    OSI_LOGI(TAG , " Executing HTTP request: %s", request->url);
+    OSI_LOGI(TAG , " Executing HTTP request (method=%d):", request->method);
+    OSI_LOG_LONG(TAG, "REQ_URL", request->url);
 
     response_buf = malloc(HTTP_RESPONSE_BUF_SIZE);
     if (!response_buf) {
@@ -619,6 +636,19 @@ static void prv_execute_http_job(http_request_item_t *item)
             client_data.post_buf = request->body;
             client_data.post_buf_len = request->body_len;
             http_ret = httpclient_post(&client, request->url, &client_data);
+            if (http_ret != HTTPCLIENT_OK) {
+                OSI_LOGW(TAG , " HTTP POST failed (ret=%d), retrying once after 2000ms...", http_ret);
+                osiThreadSleep(2000);
+                memset(&client, 0, sizeof(client));
+                client.header = header_buf;
+                client.sni_host = request->sni_host;
+                client_data.response_buf = response_buf;
+                client_data.response_buf_len = HTTP_RESPONSE_BUF_SIZE;
+                memset(response_buf, 0, HTTP_RESPONSE_BUF_SIZE);
+                client_data.post_buf = request->body;
+                client_data.post_buf_len = request->body_len;
+                http_ret = httpclient_post(&client, request->url, &client_data);
+            }
             break;
         case HTTP_METHOD_PUT:
             client_data.post_buf = request->body;
@@ -777,7 +807,7 @@ int framework_http_download_file(const char *url, const char *save_path, http_do
     return framework_http_download_file_with_md5(url, save_path, type, NULL);
 }
 
-int framework_http_download_file_callback_with_md5(const char *url, const char *save_path, http_download_type_t type, const char *expected_md5, http_download_callback_t callback, void *user_data)
+int framework_http_download_file_callback_with_header(const char *url, const char *save_path, http_download_type_t type, const char *header, const char *expected_md5, http_download_callback_t callback, void *user_data)
 {
     if (!g_http_ctx.initialized) {
         OSI_LOGE(TAG , " HTTP module not initialized");
@@ -799,6 +829,9 @@ int framework_http_download_file_callback_with_md5(const char *url, const char *
     strncpy(item->payload.download.url, url, HTTP_MAX_URL_LEN - 1);
     strncpy(item->payload.download.save_path, save_path, HTTP_DOWNLOAD_MAX_PATH - 1);
     item->payload.download.type = type;
+    if (header && strlen(header) > 0) {
+        strncpy(item->payload.download.header, header, HTTP_MAX_HEADER_LEN - 1);
+    }
     if (expected_md5) {
         strncpy(item->payload.download.expected_md5, expected_md5, sizeof(item->payload.download.expected_md5) - 1);
     }
@@ -813,6 +846,11 @@ int framework_http_download_file_callback_with_md5(const char *url, const char *
 
     OSI_LOGI(TAG , " HTTP download queued: %s -> %s", url, save_path);
     return 0;
+}
+
+int framework_http_download_file_callback_with_md5(const char *url, const char *save_path, http_download_type_t type, const char *expected_md5, http_download_callback_t callback, void *user_data)
+{
+    return framework_http_download_file_callback_with_header(url, save_path, type, NULL, expected_md5, callback, user_data);
 }
 
 int framework_http_download_file_callback(const char *url, const char *save_path, http_download_type_t type, http_download_callback_t callback, void *user_data)
@@ -875,7 +913,8 @@ int framework_http_request_async(http_request_t *request, http_callback_t callba
         return -5;
     }
 
-    OSI_LOGI(TAG , " HTTP request queued: %s", request->url);
+    OSI_LOGI(TAG , " HTTP request queued (method=%d):", request->method);
+    OSI_LOG_LONG(TAG, "QUEUE_URL", request->url);
     return 0;
 }
 
@@ -936,6 +975,34 @@ int framework_http_post_json_with_sni(const char *url, const char *body, const c
         strncpy(request->header, header, HTTP_MAX_HEADER_LEN - 1);
     } else {
         snprintf(request->header, HTTP_MAX_HEADER_LEN, "Content-Type: application/json\r\n");
+    }
+
+    int ret = framework_http_request_async(request, callback);
+    free(request);
+    return ret;
+}
+
+int framework_http_get(const char *url, const char *header,
+                       http_callback_t callback, void *user_data)
+{
+    if (!url || !callback) {
+        return -1;
+    }
+
+    http_request_t *request = (http_request_t *)malloc(sizeof(http_request_t));
+    if (!request) {
+        OSI_LOGE(TAG, "Failed to allocate http request memory for GET");
+        return -1;
+    }
+    memset(request, 0, sizeof(http_request_t));
+    request->method = HTTP_METHOD_GET;
+    request->timeout_ms = 15000;
+    request->user_data = user_data;
+
+    strncpy(request->url, url, HTTP_MAX_URL_LEN - 1);
+
+    if (header && strlen(header) > 0) {
+        strncpy(request->header, header, HTTP_MAX_HEADER_LEN - 1);
     }
 
     int ret = framework_http_request_async(request, callback);

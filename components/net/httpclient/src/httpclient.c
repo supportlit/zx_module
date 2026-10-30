@@ -327,6 +327,7 @@ static int _httpSsl_conn(httpclient_t *client, char *host){
     sprintf(port_str, "%u", client->remote_port);
     if (0 != (ret = _HttpNetConnect(&(ssl->net_ctx), host, port_str, MBEDTLS_NET_PROTO_TCP)))
     {
+        RTI_LOG("[HTTPC] _HttpNetConnect to %s:%s failed (-0x%04x)", host, port_str, -ret);
         HTTPC_LOG(" failed ! net_connect returned -0x%04x\n", -ret);
         goto ERR_EXIT;
     }
@@ -338,6 +339,7 @@ static int _httpSsl_conn(httpclient_t *client, char *host){
     if ((ret = mbedtls_ssl_config_defaults(&(ssl->ssl_conf), MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
                                            MBEDTLS_SSL_PRESET_DEFAULT)) != 0)
     {
+        RTI_LOG("[HTTPC] mbedtls_ssl_config_defaults failed (%d)", ret);
         HTTPC_LOG(" failed! mbedtls_ssl_config_defaults returned %d\n", ret);
         goto ERR_EXIT;
     }
@@ -358,6 +360,7 @@ static int _httpSsl_conn(httpclient_t *client, char *host){
     mbedtls_ssl_set_hostname(&(ssl->ssl_ctx), client->sni_host?client->sni_host:host);
     if ((ret = mbedtls_ssl_setup(&(ssl->ssl_ctx), &(ssl->ssl_conf))) != 0)
     {
+        RTI_LOG("[HTTPC] mbedtls_ssl_setup failed (%d)", ret);
         HTTPC_LOG("failed! mbedtls_ssl_setup returned %d\n", ret);
         goto ERR_EXIT;
     }
@@ -373,12 +376,14 @@ static int _httpSsl_conn(httpclient_t *client, char *host){
     {
         if ((ret != MBEDTLS_ERR_SSL_WANT_READ) && (ret != MBEDTLS_ERR_SSL_WANT_WRITE))
         {
+            RTI_LOG("[HTTPC] mbedtls_ssl_handshake failed (-0x%04x)", -ret);
             HTTPC_LOG("failed  ! mbedtls_ssl_handshake returned -0x%04x\n", -ret);
             goto ERR_EXIT;
         }
     }
 
     if ((ret = mbedtls_ssl_get_verify_result(&(ssl->ssl_ctx))) != 0) {
+        RTI_LOG("[HTTPC] mbedtls_ssl_get_verify_result failed (0x%04x)", ret < 0 ? -ret : ret);
         HTTPC_LOG("mbedtls_ssl_get_verify_result failed returned 0x%04x", ret < 0 ? -ret : ret);
         goto ERR_EXIT;
     }

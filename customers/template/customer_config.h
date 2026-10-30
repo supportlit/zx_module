@@ -61,7 +61,7 @@
 // ============================================================================
 #define TMS_HEARTBEAT_ENABLE          1
 #define TMS_HEARTBEAT_INTERVAL_SEC    60  /* Heartbeat interval in seconds (e.g. 30, 60, 120, 300) */
-#define TMS_HEARTBEAT_URL             "https://35.154.110.244:8075/sxtms/online/tms/saveHB"
+#define TMS_HEARTBEAT_URL             "https://103.157.22.211:8075/sxtms/online/tms/saveHB"
 #define TMS_HEARTBEAT_AUTH_TOKEN      "f1c3a7e8b9d5e2a0dh7d8f9dh97d"
 #define TMS_HEARTBEAT_MID             "000001"
 #define TMS_HEARTBEAT_TID             "11110003"

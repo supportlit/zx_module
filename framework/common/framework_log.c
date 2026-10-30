@@ -120,4 +120,29 @@ void framework_log_factory_mode(int enbale)
         log_factory_mode = 0;
         FRAMEWORK_LOG("Factory mode log disable\n");
     }
+}
+
+void framework_log_text_chunks_len(const char *tag, const char *prefix, const char *str, size_t len, size_t chunk_size)
+{
+    if (!str || len == 0) return;
+    if (chunk_size == 0 || chunk_size > 120) {
+        chunk_size = 100;
+    }
+    const char *p = str;
+    size_t rem = len;
+    const char *pfx = prefix ? prefix : "RAW";
+    const char *tg = tag ? tag : "LOG";
+
+    while (rem > 0) {
+        size_t chk = rem > chunk_size ? chunk_size : rem;
+        FRAMEWORK_LOG("[INFO ][%s][%s] %.*s\n", tg, pfx, (int)chk, p);
+        p += chk;
+        rem -= chk;
+    }
+}
+
+void framework_log_text_chunks(const char *tag, const char *prefix, const char *str, size_t chunk_size)
+{
+    if (!str) return;
+    framework_log_text_chunks_len(tag, prefix, str, strlen(str), chunk_size);
 } 
