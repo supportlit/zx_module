@@ -34,7 +34,7 @@ typedef enum
 /**
  * @brief Default soundbox audio language for fresh boot initialization
  */
-#define SOUNDBOX_DEFAULT_LANGUAGE LANGUAGE_HINDI
+#define SOUNDBOX_DEFAULT_LANGUAGE LANGUAGE_ENGLISH
 
 /**
  * @brief Default audio folder prefix derived automatically from SOUNDBOX_DEFAULT_LANGUAGE
